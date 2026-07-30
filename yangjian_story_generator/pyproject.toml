@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77,<83"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yangjian-story-generator"
+version = "0.1.0"
+description = "Portable domain core for the Yang Jian story generator"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = []
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

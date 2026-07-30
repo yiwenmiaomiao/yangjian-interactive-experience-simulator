@@ -1,0 +1,33 @@
+model:
+  default: deepseek-v4-flash
+  provider: deepseek
+
+command_allowlist:
+  - script execution via -e/-c flag
+  - execute_code
+  - script execution via heredoc
+
+onboarding:
+  seen:
+    profile_build_offered: true
+    busy_input_prompt: true
+
+_config_version: 31
+
+custom_providers:
+  - name: deepseek
+    base_url: https://api.deepseek.com
+    api_key: YOUR_DEEPSEEK_API_KEY
+    api_mode: chat_completions
+    models:
+      deepseek-v4-flash:
+        context_length: 1000000
+        name: deepseek-v4-flash
+
+plugins:
+  enabled:
+    - platforms/photon
+
+fallback_model:
+  provider: openrouter
+  model: deepseek/deepseek-v4-flash

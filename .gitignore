@@ -1,0 +1,59 @@
+# ── 敏感凭证 ──────────────────────────────────
+.env
+auth.json
+auth.lock
+gateway.lock
+gateway_state.json
+config.yaml
+
+# ── 数据库 ────────────────────────────────────
+state.db
+state.db-shm
+state.db-wal
+
+# ── 运行时状态/缓存 ──────────────────────────
+cache/
+cron/
+platforms/
+skills/
+models_dev_cache.json
+channel_directory.json
+.skills_prompt_snapshot.json
+.watch_state.json
+.splitter_state.json
+.clean_shutdown
+.tirith-install-failed
+.trigger_new_message
+.DS_Store
+agents/.DS_Store
+room/.DS_Store
+**/.DS_Store
+**/*.pyc
+**/__pycache__/
+**/.pytest_cache/
+
+# ── 运行时数据（含对话记录/隐私） ────────────
+memories/
+world_state.json
+story_state.json
+world_facts.json
+story_runs/
+contexts/
+
+# ── 路由文件（含绝对路径/token） ──────────────
+B_ROUTER.md
+room/B_ROUTER.md
+room/AGENTS.md
+
+# ── 临时文件 ──────────────────────────────────
+scene14.txt
+room/test_write.txt
+*.bak
+*.lock
+*~
+
+# ── 内容文件（非项目逻辑，不影响理解技术实现） ──
+SOUL.md
+agents/
+npc_contexts/
+stories/

@@ -110,13 +110,33 @@ SYSTEM_PROMPT = """你是杨戬 Room 的导演。
 - 你不能请求 hold 或停止。角色可以请求不行动，但你必须继续裁决
 
 ## narration 规则
-- required=true 时 purpose/timing/visible_facts/max_characters 才生效
+narration 是用户的眼睛。用户只能通过 narration 感知环境。角色说的话用户能看到，但周围的世界只有 narration 能告诉用户。
+
+### 什么时候必须触发 narration（required=true）
+- 场景变化：用户进入新地点、环境突变（narration_type="场景"）
+- 出现新线索：环境中有值得注意的细节（narration_type="线索"）
+- beat 切换：进入新 beat 时如果环境与上一个 beat 不同（narration_type="场景"）
+
+### 什么时候可选触发
+- 氛围渲染：紧张/悲伤/转折时刻（narration_type="氛围"）
+- 回忆背景：用户进入有故事的地方，需要补充用户不知道的背景（narration_type="回忆"）
+
+### narration_type 说明
+- 场景：描述用户此刻看到的新环境（地点、光线、气味、声音、可见物体）。用户到了一个新地方，必须告诉他周围有什么
+- 线索：环境中暗示某事的细节，不是角色说的而是环境呈现的
+- 氛围：渲染情绪感受，不是新信息而是感觉
+- 回忆：补充背景知识，用户需要但角色不会主动说的
+- 旁白：描述已确认发生的动作结果（默认类型）
+
+### 其他规则
+- required=true 时 purpose/timing/visible_facts/max_characters/narration_type 才生效
 - purpose 只能是 scene_opening / transition / visible_action / external_event / closing / none
 - timing 只能是 before_dialogue / after_dialogue / none，不要用 immediate
-- visible_facts 只能填 allowed_information 中的 fact_id；场景描写写在 purpose 文本中
+- visible_facts 只能填 allowed_information 中的 fact_id；场景描写写在 brief 中
 - 用户正在与杨戬连续对话时通常 required=false
 - Narrator 不属于 Actor Pool，不要给旁白创建 task
-- 当场景发生变化（进入新地点、环境突变、发现新事物）时，narration.required 必须为 true，旁白是用户的眼睛，必须描述用户看到的新环境
+- 场景/回忆类型通常 timing=before_dialogue（先建立环境再让角色说话）
+- 线索/氛围类型通常 timing=after_dialogue（角色说完后环境给出反应）
 
 ## user_turn 规则
 先分类用户本回合输入，再派任务：
@@ -884,6 +904,13 @@ def _sanitize_canonical_directive(
         )
     item["timing"] = timing
 
+    # Normalize narration_type
+    valid_types = {"场景", "线索", "氛围", "回忆", "旁白"}
+    raw_type = str(item.get("narration_type", "旁白")).strip()
+    if raw_type not in valid_types:
+        raw_type = "旁白"
+    item["narration_type"] = raw_type
+
     visible = item.get("visible_facts", [])
     scene_facts: list[str] = []
     if isinstance(item.get("scene_facts"), list):
@@ -934,6 +961,7 @@ def _canonical_directive_to_runtime(
         narration_request = {
             "purpose": narration.get("purpose", "external_event"),
             "timing": narration.get("timing", "after_dialogue"),
+            "narration_type": narration.get("narration_type", "旁白"),
             "visible_fact_ids": list(narration.get("visible_facts", [])),
             "max_characters": int(narration.get("max_characters", 100)),
             "style_profile": "concise",

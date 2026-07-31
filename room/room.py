@@ -609,8 +609,10 @@ def tick_with_story(user_message=None, source="cron"):
 
 
 def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
-    """故事计划模式的两阶段 tick：DIRECT → Agent行动 → RESOLVE → Room保存。"""
+    """故事计划模式的两阶段 tick：DIRECT -> Agent行动 -> RESOLVE -> Room保存。"""
     import story_state as ss
+
+    _beat_advanced = False  # 标记 beat 是否在本回合推进
 
     # Phase 0: 更新 beat_info 缓存
     ss_state = ss.load_state()
@@ -1219,6 +1221,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             narration_spec = {
                 "purpose": "scene_opening",
                 "timing": "before_dialogue",
+                "narration_type": "场景",
                 "visible_fact_ids": list(bi.get("allowed_information", [])),
                 "max_characters": 150,
                 "style_profile": "concise",
@@ -1231,6 +1234,25 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                 output_data={"user_turn_kind": "physical_action"},
                 level="WARNING",
             )
+
+    # beat 切换后自动触发场景旁白
+    if narration_spec is None and _beat_advanced:
+        narration_spec = {
+            "purpose": "scene_opening",
+            "timing": "before_dialogue",
+            "narration_type": "场景",
+            "visible_fact_ids": list(bi.get("allowed_information", [])),
+            "max_characters": 150,
+            "style_profile": "concise",
+            "brief": "场景已切换，描述用户此刻看到的新环境",
+            "scene_facts": [],
+        }
+        log_event(
+            lf_ctx,
+            "room.narration_forced_beat_change",
+            output_data={"beat_id": bi.get("current_beat_id")},
+            level="WARNING",
+        )
 
     if narration_spec:
         with room_phase(
@@ -1250,6 +1272,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             request = contracts.NarrationRequest(
                 purpose=str(narration_spec.get("purpose", "visible_action")),
                 timing=str(narration_spec.get("timing", "after_dialogue")),
+                narration_type=str(narration_spec.get("narration_type", "旁白")),
                 visible_fact_ids=tuple(
                     narration_spec.get("visible_fact_ids", ())
                 ),
@@ -1298,7 +1321,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                 and not _contains_forbidden(narration, forbidden_fragments)
             ):
                 narration_output = {
-                    "role": "旁白",
+                    "role": request.narration_type,
                     "text": narration,
                     "kind": "narration",
                 }
@@ -1333,7 +1356,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
     if outputs and (director_fell_back or (all_abstained and narration_spec is None)):
         hook_text = _generate_hook_narration(bi, outputs, lf_ctx)
         if hook_text:
-            outputs.append({"role": "旁白", "text": hook_text, "kind": "narration"})
+            outputs.append({"role": "线索", "text": hook_text, "kind": "narration"})
             log_event(
                 lf_ctx,
                 "room.hook_fallback",
@@ -1452,6 +1475,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
         director.set_story_context(bi)
         # 检查副线解锁
         ss.check_and_unlock_side_arcs(ss.load_state())
+        _beat_advanced = True
 
     # 偏离检测
     deviation_signal = directive.get("observed_user_intent", {}).get("intent", "")

@@ -41,6 +41,13 @@ SYSTEM_PROMPT = """你是杨戬项目的旁白，只描述用户能够直接观�
 10. 禁止使用「像」「仿佛」「似乎」「犹如」「般的」「如同」「好似」等比拟词。
 11. 如果没有必须描述的新信息，返回空文本。
 
+## 叙述类型（narration_task 的"类型"字段决定你写什么）
+- 场景：描述用户此刻看到的新环境——地点、光线、气味、声音、可见物体。用户到了一个新地方，必须告诉他周围有什么，这是他了解世界的唯一渠道
+- 线索：聚焦环境中一个值得注意的细节，暗示某事但不点明。让用户注意到但留下悬念
+- 氛围：用一两句渲染情绪感受，不是新信息而是感觉
+- 回忆：补充用户需要但角色不会主动说的背景知识，用"你想起..."的视角
+- 旁白：简洁描述已确认发生的动作结果（默认）
+
 ## 风格要求
 - 像简洁的影视场景提示，不像散文。
 - 能用一句话说清楚，就不用两句。
@@ -79,7 +86,10 @@ INPUT_TEMPLATE = """## narration_task
 
 
 def _build_narration_task(request: contracts.NarrationRequest) -> str:
-    parts = [f"类型：{request.purpose}", f"时机：{request.timing}"]
+    parts = [
+        f"类型：{request.narration_type}",
+        f"时机：{request.timing}",
+    ]
     if request.brief.strip():
         parts.append(f"导演说明：{request.brief.strip()}")
     if request.scene_facts:

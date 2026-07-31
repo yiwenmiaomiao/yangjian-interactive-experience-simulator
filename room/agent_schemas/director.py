@@ -115,6 +115,7 @@ class DirectorNarrationOutput(BaseModel):
     required: bool
     purpose: str
     timing: str
+    narration_type: str = "旁白"
     visible_facts: list[str] = Field(default_factory=list)
     max_characters: int = Field(ge=0, le=200)
     brief: str = ""

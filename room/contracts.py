@@ -128,6 +128,7 @@ class NPCCommand:
 class NarrationRequest:
     purpose: str
     timing: str = "after_dialogue"
+    narration_type: str = "旁白"
     visible_fact_ids: tuple[str, ...] = ()
     max_characters: int = 100
     style_profile: str = "concise"
@@ -702,6 +703,7 @@ def director_directive_from_dict(
         NarrationRequest(
             purpose=str(narration_data.get("purpose", "visible_action")),
             timing=str(narration_data.get("timing", "after_dialogue")),
+            narration_type=str(narration_data.get("narration_type", "旁白")),
             visible_fact_ids=tuple(
                 narration_data.get("visible_fact_ids", ())
             ),

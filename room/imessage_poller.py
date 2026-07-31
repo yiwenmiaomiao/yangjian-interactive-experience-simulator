@@ -68,7 +68,11 @@ def fetch_new_messages(last_id: int) -> list[dict]:
 
 
 def process_message(text: str) -> bool:
-    """处理一条消息，返回是否成功。"""
+    """处理一条消息，返回是否应推进游标。
+
+    Tick 成功即推进，避免 deliver 失败时同一条消息死循环重试。
+    发送失败单独告警，由运维/sidecar 排查。
+    """
     import importlib
     pb = importlib.import_module("photon_room_bridge")
 
@@ -82,12 +86,19 @@ def process_message(text: str) -> bool:
     delivery = result.get("delivery", {})
     sent = delivery.get("sent", 0)
     skipped = delivery.get("skipped", 0)
-    if not result.get("output", []):
+    outputs = result.get("output") or []
+    if not outputs:
         print(f"[poll] 无输出", file=sys.stderr)
         return True
 
     print(f"[poll] 发送 {sent}, 跳过 {skipped}", file=sys.stderr)
-    return sent > 0
+    if sent == 0:
+        print(
+            "[poll] 警告: tick 成功但 deliver sent=0，仍推进游标避免死循环。"
+            f" delivery={delivery}",
+            file=sys.stderr,
+        )
+    return True
 
 
 def poll_loop(interval: float = 3.0):

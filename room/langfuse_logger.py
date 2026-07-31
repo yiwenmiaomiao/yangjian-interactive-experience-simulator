@@ -450,6 +450,7 @@ def log_generation(
     messages: list | None = None,
     output: str = "",
     duration_ms: float = 0,
+    metadata: dict[str, Any] | None = None,
 ):
     """记录一次 LLM 调用。"""
     if not _ENABLED:
@@ -469,23 +470,39 @@ def log_generation(
                     f"{_truncate(str(m.get('content', '')))}"
                 )
 
+        meta = {
+            **ctx.base_metadata(),
+            "duration_ms": duration_ms,
+            "content_len": len(output or ""),
+            "empty_content": not bool((output or "").strip()),
+        }
+        if metadata:
+            meta.update(metadata)
+        level = "ERROR" if meta.get("empty_content") else "DEFAULT"
+        out = _truncate(output) if (output or "").strip() else {
+            "status": "empty_content",
+            "finish_reason": meta.get("finish_reason"),
+            "usage": meta.get("usage"),
+            "raw_choice": meta.get("raw_choice"),
+        }
+
         with propagate_attributes(session_id=ctx.session_id, user_id=ctx.user_id):
             with lf.start_as_current_observation(
                 as_type="span",
                 name=agent_id,
                 input=inp,
-                output=_truncate(output),
-                metadata={
-                    **ctx.base_metadata(),
-                    "duration_ms": duration_ms,
-                },
+                output=out,
+                metadata=meta,
+                level=level,
             ) as span:
                 with span.start_as_current_observation(
                     as_type="generation",
                     name=f"{agent_id}.llm",
-                    model="deepseek-v4-flash",
+                    model=str(meta.get("model") or "deepseek-v4-flash"),
                     input=inp,
-                    output=_truncate(output),
+                    output=out,
+                    metadata=meta,
+                    level=level,
                 ):
                     pass
     except Exception:

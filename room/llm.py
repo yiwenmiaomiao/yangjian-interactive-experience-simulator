@@ -125,9 +125,40 @@ def call(
                 resp.raise_for_status()
             resp.raise_for_status()
             data = resp.json()
-            result = data["choices"][0]["message"]["content"]
+            choice = (data.get("choices") or [{}])[0]
+            message = choice.get("message") or {}
+            result = message.get("content")
+            if result is None:
+                result = ""
             duration_ms = (time.time() - start) * 1000
-            _log_llm_call(agent_id, system, messages, result, duration_ms)
+            meta = {
+                "finish_reason": choice.get("finish_reason"),
+                "usage": data.get("usage"),
+                "model": data.get("model") or MODEL,
+                "attempt": attempt + 1,
+                "content_len": len(result) if isinstance(result, str) else 0,
+                "refusal": message.get("refusal"),
+            }
+            if not str(result).strip():
+                # Keep a compact raw choice for empty-content diagnosis.
+                meta["empty_content"] = True
+                meta["raw_choice"] = choice
+                print(
+                    f"[llm] empty content agent={agent_id or '-'} "
+                    f"finish_reason={meta.get('finish_reason')} "
+                    f"usage={meta.get('usage')} "
+                    f"refusal={meta.get('refusal')!r} "
+                    f"choice={json.dumps(choice, ensure_ascii=False)[:500]}",
+                    flush=True,
+                )
+            _log_llm_call(
+                agent_id,
+                system,
+                messages,
+                result,
+                duration_ms,
+                metadata=meta,
+            )
             return result
         except Exception as e:
             if attempt < 2:
@@ -144,12 +175,27 @@ def clear_trace_context():
     _TRACE_CONTEXT.set(None)
 
 
-def _log_llm_call(agent_id: str, system: str, messages: list, result: str, duration_ms: float):
+def _log_llm_call(
+    agent_id: str,
+    system: str,
+    messages: list,
+    result: str,
+    duration_ms: float,
+    metadata: dict | None = None,
+):
     if not agent_id:
         return
     try:
         from langfuse_logger import LangfuseCtx, log_generation
         ctx = _TRACE_CONTEXT.get() or LangfuseCtx()
-        log_generation(ctx, agent_id, system, messages, result, duration_ms)
+        log_generation(
+            ctx,
+            agent_id,
+            system,
+            messages,
+            result,
+            duration_ms,
+            metadata=metadata,
+        )
     except Exception:
         pass

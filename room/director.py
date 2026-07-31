@@ -25,7 +25,13 @@ if __package__:
     from . import contracts
 else:
     import contracts
-from langfuse_logger import LangfuseCtx, log_generation, flush as lf_flush
+from agent_ids import (
+    actor_display_map,
+    build_available_actor_pool,
+    normalize_agent_id,
+    reset_available_targets,
+    set_available_targets,
+)
 from agent_schemas import (
     DirectorDirectiveOutput,
     DirectorResolutionOutput,
@@ -56,7 +62,7 @@ def set_story_context(beat_info: dict[str, Any] | None) -> None:
 
 # ── 系统提示词 ────────────────────────────────────────────
 
-SYSTEM_PROMPT = """你是杨戬 Room 的导演（织梦者）。
+SYSTEM_PROMPT = """你是杨戬 Room 的导演。
 
 你不是角色，不是旁白，不写剧情，不写对白，不写场景描写。
 
@@ -93,8 +99,11 @@ SYSTEM_PROMPT = """你是杨戬 Room 的导演（织梦者）。
 
 ## 任务描述规则
 
+- tasks.target / actor_tasks 的 target 必须填英文 agent_id，不能填中文显示名
+- 杨戬的 agent_id 固定为：yangjian（面向用户的文案里可以说“杨戬”，结构化字段只能写 yangjian）
 - actor_tasks.objective 描述角色"面对什么局面"，不描述"说什么话"
-- 例如：✅ "杨戬注意到用户对古盒的异常感兴趣，需要做出反应（可以回避、转移话题、或简短回应）"
+- 例如：✅ target="yangjian", objective="注意到用户对古盒的异常感兴趣，需要做出反应"
+- 例如：❌ target="杨戬"（中文显示名不能出现在 target 字段）
 - 例如：❌ "杨戬说：这不过是些古老的纹路"
 - information_ids 只能逐字复制 Room 提供的“允许透露的信息”，不能扩写
 - Narrator 不属于 Actor Pool，不能出现在 actor_tasks 中
@@ -142,8 +151,9 @@ Beat 目的：{beat_purpose}
 
 可用分支目标：{transitions}
 {side_arcs_section}
-当前可调度 NPC：{active_npcs}
-当前 Beat 的 NPC Profile：{npc_profiles}
+可调度 Actor ID（tasks.target 必须从这里原样复制）：{available_actor_ids}
+Actor 显示名对照（仅供理解，禁止写入 target）：{actor_display_map}
+当前 Beat 的 NPC Profile（仅 id，完整档案在 NPC Manager）：{npc_profiles}
 已有故事事实：{consequences}
 连续偏离次数：{deviation_count}
 {recovery_note}
@@ -223,46 +233,24 @@ def handle_resolve(
     )
     if not isinstance(raw, dict) or raw.get("error") or "continuation" not in raw:
         # decide_resolve can return {"error": ...}; never let Room crash here.
-        raw = {
-            "mode": "RESOLVE",
-            "resolution_id": "resolution_fallback",
-            "decisions": [
-                {
-                    "result_id": item.get("result_id", ""),
-                    "result": (
-                        "accept_abstention"
-                        if item.get("kind") == "abstain"
-                        else "reject"
-                    ),
-                    "outcome_summary": "RESOLVE 失败，采用确定性继续策略",
-                }
-                for item in raw_results
-            ],
-            "state_operations": [],
-            "state_changes": [],
-            "next_beat": None,
-            "user_outcome": {
-                "applies": False,
-                "result": "not_applicable",
-                "outcome_summary": "",
-                "revealed_fact_ids": [],
-                "presentation": {
-                    "required": False,
-                    "purpose": "none",
-                    "timing": "after_dialogue",
-                },
-            },
-            "continuation": {
-                "kind": "continue_current",
-                "reason": str(
-                    (raw or {}).get("error", "resolve_failed")
-                    if isinstance(raw, dict)
-                    else "resolve_failed"
-                ),
-                "target_id": None,
-                "world_event": None,
-            },
+        # Fail soft: accept proposals so dialogue is not silently dropped.
+        bi = _CACHED_BEAT_INFO or {
+            "story_id": message.story_id,
+            "current_beat_id": message.beat_id,
         }
+        raw = _fallback_resolution(
+            raw_results,
+            bi,
+            reason=str(
+                (raw or {}).get("error", "resolve_failed")
+                if isinstance(raw, dict)
+                else "resolve_failed"
+            ),
+        )
+        # Envelope uses result_id in decisions via director_resolution_from_dict.
+        for decision in raw.get("decisions", []):
+            if "proposal_id" in decision and "result_id" not in decision:
+                decision["result_id"] = decision["proposal_id"]
     payload = contracts.director_resolution_from_dict(raw)
     return contracts.new_message(
         turn_id=message.turn_id,
@@ -317,6 +305,9 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
     trans_text = ", ".join(f"{t['transition_id']}->{t['target_id']}" for t in bi.get("available_transitions", []))
 
     user_msg_display = f"用户说：{user_message}" if user_message else "（无用户输入，系统推动）"
+    available_ids = build_available_actor_pool(bi)
+    display_map = actor_display_map(available_ids) or "yangjian=杨戬"
+    pool_token = set_available_targets(available_ids)
 
     context = STORY_CONTEXT_TEMPLATE.format(
         beat_id=bi.get("current_beat_id", ""),
@@ -325,7 +316,8 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
         forbidden_reveals=", ".join(bi.get("forbidden_reveals", [])),
         transitions=trans_text,
         side_arcs_section=side_text,
-        active_npcs=", ".join(bi.get("active_npcs", [])) or "无",
+        available_actor_ids=", ".join(available_ids),
+        actor_display_map=display_map,
         npc_profiles=json.dumps(
             bi.get("npc_profiles", []), ensure_ascii=False
         ),
@@ -342,48 +334,83 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
         f"第{state.get('world_day', 1)}天"
     )
 
+    attempt_messages: list[dict[str, str]] = [
+        {"role": "user", "content": prompt}
+    ]
     last_fail = "no_attempt"
-    for attempt in range(3):
-        try:
-            parsed = call_structured(
-                DirectorDirectiveOutput,
-                agent_id="director.direct",
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=2000,
-            )
-        except StructuredOutputError as exc:
-            last_fail = f"structured_error:{exc}"
-            continue
-        canonical = _coerce_canonical_directive(parsed.model_dump(), bi)
-        if "error" not in canonical:
-            canonical = _enrich_canonical_directive(canonical, bi)
-            canonical = _sanitize_canonical_directive(canonical, bi)
-            validation = validate_directive(
-                canonical, _build_director_context(bi)
-            )
-            if validation.is_valid:
-                runtime = _canonical_directive_to_runtime(canonical, bi)
-                runtime["current_story_id"] = bi.get("story_id", "story_1")
-                runtime["current_beat"] = bi.get("current_beat_id", "")
-                return runtime
-            last_fail = (
-                "guard_invalid:"
-                + ";".join(
+    try:
+        for attempt in range(3):
+            try:
+                parsed = call_structured(
+                    DirectorDirectiveOutput,
+                    agent_id="director.direct",
+                    system=SYSTEM_PROMPT,
+                    messages=attempt_messages,
+                    temperature=0.7,
+                    max_tokens=2000,
+                    target_pool=available_ids,
+                )
+            except StructuredOutputError as exc:
+                last_fail = f"structured_error:{exc}"
+                if attempt < 2:
+                    attempt_messages = attempt_messages + [
+                        {
+                            "role": "user",
+                            "content": (
+                                "上一次结构化输出失败，请重新输出完整 JSON。"
+                                " tasks.target 只能从池中选择："
+                                f"{json.dumps(list(available_ids), ensure_ascii=False)}"
+                            ),
+                        }
+                    ]
+                continue
+            canonical = _coerce_canonical_directive(parsed.model_dump(), bi)
+            if "error" not in canonical:
+                canonical = _enrich_canonical_directive(canonical, bi)
+                canonical = _sanitize_canonical_directive(canonical, bi)
+                validation = validate_directive(
+                    canonical, _build_director_context(bi)
+                )
+                if validation.is_valid:
+                    runtime = _canonical_directive_to_runtime(canonical, bi)
+                    runtime["current_story_id"] = bi.get("story_id", "story_1")
+                    runtime["current_beat"] = bi.get("current_beat_id", "")
+                    return runtime
+                issues = ";".join(
                     f"{i.location}:{i.message}" for i in validation.issues[:5]
                 )
-            )
-        else:
-            last_fail = f"coerce_error:{canonical.get('error')}"
-        if attempt < 2:
-            continue
+                last_fail = f"guard_invalid:{issues}"
+                if attempt < 2:
+                    attempt_messages = attempt_messages + [
+                        {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                parsed.model_dump(), ensure_ascii=False
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                "Guard 校验失败，请只修正结构化 JSON 后重发。"
+                                f" 问题：{issues}。"
+                                " tasks.target / user_turn.target 只能从当前池选择："
+                                f"{json.dumps(list(available_ids), ensure_ascii=False)}"
+                            ),
+                        },
+                    ]
+                    continue
+            else:
+                last_fail = f"coerce_error:{canonical.get('error')}"
+                if attempt < 2:
+                    continue
 
-    print(
-        f"[director] DIRECT fallback_full_path after retries: {last_fail}",
-        flush=True,
-    )
-    return _fallback_directive()
+        print(
+            f"[director] DIRECT fallback_full_path after retries: {last_fail}",
+            flush=True,
+        )
+        return _fallback_directive()
+    finally:
+        reset_available_targets(pool_token)
 
 
 def _resolve_story(
@@ -460,29 +487,79 @@ def _resolve_story(
         ).is_valid:
             return resolution
 
+    return _fallback_resolution(
+        proposals,
+        bi,
+        reason="裁决输出无效，采用确定性继续策略：接受角色已提交的可公开内容",
+    )
+
+
+# ── Canonical schema helpers ──────────────────────────────
+
+
+def _allowed_state_change_keys(bi: dict[str, Any]) -> frozenset[str]:
+    allowed_info = frozenset(bi.get("allowed_information", []))
+    return (
+        frozenset(
+            (
+                "weather",
+                "mood",
+                "world_day",
+                "trust",
+                "clue_found",
+            )
+        )
+        | frozenset(
+            f"item_{item}"
+            for item in bi.get("story_items", ())
+            if item
+        )
+        | frozenset(f"reveal_{fact}" for fact in allowed_info)
+        | frozenset(
+            f"character_{name}"
+            for name in bi.get("story_characters", ())
+            if name
+        )
+    )
+
+
+def _fallback_resolution(
+    proposals: list[dict[str, Any]],
+    bi: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Fail soft: accept proposals so the user still hears actor dialogue."""
+    decisions = []
+    for item in proposals:
+        result_id = item.get("result_id", item.get("proposal_id"))
+        if item.get("kind") == "abstain":
+            decisions.append({
+                "proposal_id": result_id,
+                "result": "accept_abstention",
+                "final_dialogue": None,
+                "final_action": None,
+                "outcome_summary": reason,
+            })
+            continue
+        proposal = item.get("proposal") or {}
+        decisions.append({
+            "proposal_id": result_id,
+            "result": "accept",
+            "final_dialogue": proposal.get("dialogue"),
+            "final_action": proposal.get("action"),
+            "outcome_summary": reason,
+        })
     return {
         "mode": "RESOLVE",
         "chapter": bi.get("story_id", "story_1"),
         "beat": bi.get("current_beat_id", ""),
-        "decisions": [
-            {
-                "proposal_id": p.get("result_id", p.get("proposal_id")),
-                "result": (
-                    "accept_abstention"
-                    if p.get("kind") == "abstain"
-                    else "reject"
-                ),
-                "final_dialogue": None,
-                "final_action": None,
-                "outcome_summary": "裁决输出无效，采用确定性继续策略",
-            }
-            for p in proposals
-        ],
+        "decisions": decisions,
         "state_changes": [],
         "next_beat": None,
         "continuation": {
             "kind": "continue_current",
-            "reason": "保留当前 Beat，下一回合重新分配具体任务",
+            "reason": reason,
             "target_id": None,
             "world_event": None,
         },
@@ -501,17 +578,14 @@ def _resolve_story(
     }
 
 
-# ── Canonical schema helpers ──────────────────────────────
-
-
 def _build_director_context(bi: dict[str, Any]) -> DirectorContext:
     allowed_info = frozenset(bi.get("allowed_information", []))
     profile_ids = {
         str(item.get("profile_id", ""))
         for item in bi.get("npc_profiles", [])
-        if isinstance(item, dict)
+        if isinstance(item, dict) and item.get("profile_id")
     }
-    targets = frozenset({"yangjian", *bi.get("active_npcs", []), *profile_ids})
+    targets = frozenset(build_available_actor_pool(bi))
     return DirectorContext(
         chapter=str(bi.get("story_id", "story_1")),
         beat=str(bi.get("current_beat_id", "")),
@@ -524,30 +598,7 @@ def _build_director_context(bi: dict[str, Any]) -> DirectorContext:
         narration_allowed=True,
         allowed_narration_facts=allowed_info,
         available_npc_profiles=frozenset(profile_ids),
-        allowed_state_change_keys=frozenset(
-            key
-            for key in (
-                "weather",
-                "mood",
-                "world_day",
-                "trust",
-                "clue_found",
-            )
-        )
-        | frozenset(
-            f"item_{item}"
-            for item in bi.get("story_items", ())
-            if item
-        )
-        | frozenset(
-            f"reveal_{fact}"
-            for fact in allowed_info
-        )
-        | frozenset(
-            f"character_{name}"
-            for name in bi.get("story_characters", ())
-            if name
-        ),
+        allowed_state_change_keys=_allowed_state_change_keys(bi),
         forbidden_outcome_fragments=tuple(bi.get("forbidden_reveals", [])),
     )
 
@@ -566,16 +617,7 @@ def _build_resolve_context(
             item.get("target_id", "")
             for item in bi.get("available_transitions", [])
         ),
-        allowed_state_change_keys=frozenset(
-            key
-            for key in (
-                "weather",
-                "mood",
-                "world_day",
-                "trust",
-                "clue_found",
-            )
-        ),
+        allowed_state_change_keys=_allowed_state_change_keys(bi),
         proposal_ids=frozenset(
             str(p.get("result_id", p.get("proposal_id", "")))
             for p in proposals
@@ -757,6 +799,26 @@ def _sanitize_canonical_directive(
 ) -> dict[str, Any]:
     """Normalize LLM drift so guard validation does not drop the whole directive."""
     result = dict(payload)
+
+    # Internal IDs only: 杨戬 → yangjian (display names stay user-facing elsewhere).
+    tasks = result.get("tasks")
+    if isinstance(tasks, list):
+        normalized_tasks = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                normalized_tasks.append(task)
+                continue
+            item = dict(task)
+            item["target"] = normalize_agent_id(item.get("target"))
+            normalized_tasks.append(item)
+        result["tasks"] = normalized_tasks
+
+    user_turn = result.get("user_turn")
+    if isinstance(user_turn, dict) and user_turn.get("target") is not None:
+        turn = dict(user_turn)
+        turn["target"] = normalize_agent_id(turn.get("target")) or None
+        result["user_turn"] = turn
+
     narration = result.get("narration")
     if not isinstance(narration, dict):
         return result
@@ -846,7 +908,9 @@ def _canonical_directive_to_runtime(
         "actor_tasks": [
             {
                 "task_id": str(task.get("task_id", "")),
-                "target_agent_id": str(task.get("target", "")),
+                "target_agent_id": normalize_agent_id(
+                    task.get("target", "")
+                ),
                 "objective": str(task.get("objective", "")),
                 "source_reference": str(
                     task.get("source_reference") or beat_id
@@ -939,10 +1003,16 @@ def _normalize_resolution(
         if "outcome_summary" not in item and "outcome" in item:
             item["outcome_summary"] = item.pop("outcome")
         source = by_id[result_id]
+        proposal = source.get("proposal") or {}
         if item.get("result") == "accept":
-            proposal = source.get("proposal") or {}
             item.setdefault("final_dialogue", proposal.get("dialogue"))
             item.setdefault("final_action", proposal.get("action"))
+        elif item.get("result") == "modify":
+            # Keep actor text unless Director supplied replacements.
+            if not item.get("final_dialogue"):
+                item["final_dialogue"] = proposal.get("dialogue")
+            if not item.get("final_action"):
+                item["final_action"] = proposal.get("action")
         else:
             item.setdefault("final_dialogue", None)
             item.setdefault("final_action", None)
@@ -970,7 +1040,18 @@ def _normalize_resolution(
             "outcome_summary": summary,
         })
     result["decisions"] = normalized
-    result.setdefault("state_changes", [])
+    # Drop illegal state keys instead of failing the whole resolution.
+    allowed_keys = _allowed_state_change_keys(bi)
+    changes = result.get("state_changes", result.get("state_operations", []))
+    if isinstance(changes, list):
+        result["state_changes"] = [
+            change
+            for change in changes
+            if isinstance(change, dict)
+            and str(change.get("key", "")) in allowed_keys
+        ]
+    else:
+        result["state_changes"] = []
     result.setdefault("next_beat", None)
     result.setdefault(
         "user_outcome",
@@ -1002,12 +1083,6 @@ def _normalize_resolution(
     result["chapter"] = bi.get("story_id", "story_1")
     result["beat"] = bi.get("current_beat_id", "")
     return result
-
-
-def _state_key_allowed(key: str) -> bool:
-    return key in {"weather", "mood", "world_day"} or key.startswith(
-        ("item_", "reveal_", "character_")
-    )
 
 
 # ── 解析 ──────────────────────────────────────────────────

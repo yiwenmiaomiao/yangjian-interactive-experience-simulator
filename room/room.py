@@ -24,6 +24,7 @@ from typing import Any, Mapping
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runtime_context, state_manager, story_engine
+from agent_ids import display_agent_name, is_yangjian, normalize_agent_id
 from langfuse_logger import (
     LangfuseCtx,
     flush as lf_flush,
@@ -882,7 +883,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                     },
                 )
                 try:
-                    if target in {"yangjian", "杨戬"}:
+                    if is_yangjian(target):
                         perception_text = state_manager.get_perception(
                             "yangjian", state, ""
                         )
@@ -1557,13 +1558,21 @@ def _apply_actor_resolution(
         if not isinstance(proposal, dict):
             continue
         if decision_result == "modify":
-            dialogue = decision.get("final_dialogue")
-            action = decision.get("final_action")
+            # Prefer director-confirmed text; if omitted, keep actor proposal
+            # so modify never silently drops user-visible dialogue/action.
+            dialogue = (
+                decision.get("final_dialogue")
+                or proposal.get("dialogue")
+            )
+            action = (
+                decision.get("final_action")
+                or proposal.get("action")
+            )
         else:
             dialogue = decision.get("final_dialogue", proposal.get("dialogue"))
             action = decision.get("final_action", proposal.get("action"))
         agent_id = str(actor_result.get("agent_id", ""))
-        role = "杨戬" if agent_id in {"yangjian", "杨戬"} else agent_id
+        role = display_agent_name(agent_id) or agent_id
         outcome = str(decision.get("outcome_summary", "")).strip()
         event_id = f"confirmed_{result_id or index + 1}"
         if outcome:
@@ -1571,7 +1580,7 @@ def _apply_actor_resolution(
                 "event_id": event_id,
                 "event_type": "actor_result",
                 "summary": outcome,
-                "participants": [agent_id],
+                "participants": [normalize_agent_id(agent_id) or agent_id],
                 "fact_ids": [],
             })
         if isinstance(action, dict):
@@ -1582,7 +1591,7 @@ def _apply_actor_resolution(
                     "kind": "action",
                     "text": text,
                     "npc_id": (
-                        None if agent_id in {"yangjian", "杨戬"} else agent_id
+                        None if is_yangjian(agent_id) else agent_id
                     ),
                     "confirmed_event_ids": [event_id] if outcome else [],
                 })
@@ -1594,7 +1603,7 @@ def _apply_actor_resolution(
                     "kind": "dialogue",
                     "text": text,
                     "npc_id": (
-                        None if agent_id in {"yangjian", "杨戬"} else agent_id
+                        None if is_yangjian(agent_id) else agent_id
                     ),
                     "confirmed_event_ids": [event_id] if outcome else [],
                 })

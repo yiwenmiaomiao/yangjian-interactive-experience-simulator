@@ -614,10 +614,14 @@ def _presentation_request_from_dict(
 ) -> PresentationRequest:
     if not isinstance(data, Mapping):
         return PresentationRequest()
+    raw_timing = str(data.get("timing", "after_dialogue") or "")
+    # Sanitize: LLM may return empty string or invalid value
+    if raw_timing not in {"none", "before_dialogue", "after_dialogue"}:
+        raw_timing = "after_dialogue"
     return PresentationRequest(
         required=bool(data.get("required", False)),
-        purpose=str(data.get("purpose", "none")),
-        timing=str(data.get("timing", "after_dialogue")),
+        purpose=str(data.get("purpose", "none") or "none"),
+        timing=raw_timing,
     )
 
 

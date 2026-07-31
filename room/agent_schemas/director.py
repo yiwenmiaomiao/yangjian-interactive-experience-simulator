@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from agent_ids import coerce_target_in_pool, normalize_agent_id
 
 
 class ObservedUserIntentOutput(BaseModel):
@@ -38,6 +40,11 @@ class UserTurnOutput(BaseModel):
     ]
     target: str | None = None
     disclosure: UserTurnDisclosureOutput
+
+    @field_validator("target", mode="before")
+    @classmethod
+    def _normalize_target(cls, value: Any) -> str | None:
+        return coerce_target_in_pool(value, allow_none=True)
 
 
 class ResolveGateOutput(BaseModel):
@@ -83,11 +90,21 @@ class DirectorTaskOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     task_id: str = Field(min_length=1)
-    target: str = Field(min_length=1)
+    target: str = Field(
+        min_length=1,
+        description="Canonical English agent_id (yangjian), never display name",
+    )
     source_reference: str = Field(min_length=1)
     objective: str = Field(min_length=1)
     information_ids: list[str] = Field(default_factory=list)
     success_condition: str = Field(min_length=1)
+
+    @field_validator("target", mode="before")
+    @classmethod
+    def _normalize_target(cls, value: Any) -> str:
+        result = coerce_target_in_pool(value, allow_none=False)
+        assert result is not None
+        return result
 
 
 class DirectorNarrationOutput(BaseModel):
@@ -116,6 +133,18 @@ class NPCCommandOutput(BaseModel):
     npc_id: str | None = None
     target_scene_id: str | None = None
     reason: str = Field(min_length=1)
+
+    @field_validator("npc_id", mode="before")
+    @classmethod
+    def _normalize_npc_id(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        # NPC command ids may be pool members or free profile wires;
+        # normalize aliases but only enforce pool when already registered.
+        return normalize_agent_id(text)
 
 
 class DirectorDirectiveOutput(BaseModel):
@@ -162,6 +191,10 @@ class ResolutionDecisionOutput(BaseModel):
         "accept_abstention",
     ]
     outcome_summary: str = Field(min_length=1)
+    # Optional confirmed text for modify/accept. Room falls back to the
+    # original actor proposal when these are omitted.
+    final_dialogue: dict[str, Any] | None = None
+    final_action: dict[str, Any] | None = None
 
 
 class ContinuationOutput(BaseModel):

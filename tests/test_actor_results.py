@@ -84,6 +84,46 @@ class ActorResultTests(unittest.TestCase):
         self.assertEqual([], outputs)
         self.assertEqual([], events)
 
+    def test_modify_without_finals_falls_back_to_proposal(self) -> None:
+        actor_result = {
+            "result_id": "r1",
+            "task_id": "task_1",
+            "agent_id": "yangjian",
+            "kind": "proposal",
+            "proposal": {
+                "dialogue": {"text": "先看看再说", "intent": "respond"},
+                "action": {"description": "抬手示意", "action_type": "act"},
+            },
+            "abstention": None,
+        }
+        outputs, _ = room._apply_actor_resolution(
+            [actor_result],
+            {
+                "decisions": [{
+                    "proposal_id": "r1",
+                    "result": "modify",
+                    "outcome_summary": "语气略作收敛",
+                    "final_dialogue": None,
+                    "final_action": None,
+                }],
+                "continuation": {
+                    "kind": "continue_current",
+                    "reason": "ok",
+                },
+            },
+            [],
+        )
+        self.assertEqual(
+            [
+                {"role": "杨戬的动作", "kind": "action", "text": "抬手示意"},
+                {"role": "杨戬", "kind": "dialogue", "text": "先看看再说"},
+            ],
+            [
+                {"role": o["role"], "kind": o["kind"], "text": o["text"]}
+                for o in outputs
+            ],
+        )
+
 
     def test_yangjian_prompt_uses_readable_history_not_raw_json(self) -> None:
         history = (

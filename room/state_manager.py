@@ -12,10 +12,28 @@ PROFILE_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
 STATE_PATH = os.path.join(PROFILE_DIR, "world_state.json")
 
 
+def default_state():
+    return {
+        "tick": 0,
+        "weather": "晴",
+        "mood": "平静",
+        "world_day": 1,
+        "stories": {},
+        "event_log": [],
+        "permissions": {
+            "yangjian": ["weather", "time", "ambient_events"],
+        },
+    }
+
+
 def load():
-    """加载世界状态"""
+    """加载世界状态；缺失时创建默认状态并落盘。"""
     path = runtime_context.scoped_path(STATE_PATH)
     source = path if os.path.exists(path) else STATE_PATH
+    if not os.path.exists(source):
+        state = default_state()
+        save(state)
+        return state
     with open(source, "r", encoding="utf-8") as f:
         state = json.load(f)
     if path != source:

@@ -24,6 +24,14 @@ from typing import Any, Mapping
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runtime_context, state_manager, story_engine
+from langfuse_logger import (
+    LangfuseCtx,
+    flush as lf_flush,
+    log_error,
+    log_event,
+    log_state_change,
+    room_phase,
+)
 if __package__:
     from . import (
         contracts,
@@ -52,8 +60,39 @@ def _serialized_tick(function):
     def wrapped(*args, **kwargs):
         with _TICK_LOCK:
             lock_path = os.path.join(PROFILE_DIR, ".room_tick.lock")
-            with runtime_context.process_lock(lock_path):
-                return function(*args, **kwargs)
+            try:
+                import time as _time
+                wait_started = _time.monotonic()
+                with runtime_context.process_lock(lock_path):
+                    waited = _time.monotonic() - wait_started
+                    if waited > 0.2:
+                        try:
+                            log_event(
+                                LangfuseCtx(source="lock"),
+                                "room.lock_waited",
+                                output_data={"waited_s": round(waited, 3)},
+                                level="WARNING",
+                            )
+                        except Exception:
+                            pass
+                    return function(*args, **kwargs)
+            except TimeoutError as exc:
+                try:
+                    log_error(
+                        LangfuseCtx(source="lock"),
+                        "room.lock_timeout",
+                        exc,
+                    )
+                except Exception:
+                    pass
+                return {
+                    "ok": False,
+                    "error": "room_lock_timeout",
+                    "output": [{
+                        "role": "系统",
+                        "text": "【Room 忙碌超时，请稍后重试】",
+                    }],
+                }
     return wrapped
 
 
@@ -271,9 +310,29 @@ def tick(
         dict: {"ok": bool, "output": [...], "state": {...}, "decision": {...}}
     """
     global _story_plan_active
+
     identity_token = runtime_context.set_identity(user_id, thread_id)
+    lf_ctx = LangfuseCtx(
+        tick=0,
+        user_id=user_id,
+        thread_id=thread_id,
+        source=source,
+    )
     try:
-        state = state_manager.load()
+        log_event(
+            lf_ctx,
+            "room.tick_enter",
+            input_data={
+                "user_message": user_message,
+                "source": source,
+                "user_id": user_id,
+                "thread_id": thread_id,
+            },
+        )
+        with room_phase(lf_ctx, "room.load_state"):
+            state = state_manager.load()
+        lf_ctx.tick = int(state.get("tick", 0)) + 1
+        lf_ctx.turn_id = f"turn_{lf_ctx.tick}"
         if user_message:
             _capture_explicit_preferences(user_message, user_id)
 
@@ -283,17 +342,48 @@ def tick(
         _story_plan_active = bool(
             plan and persisted_story.get("status") == "active"
         )
+        log_event(
+            lf_ctx,
+            "room.story_plan_gate",
+            output_data={
+                "has_plan": bool(plan),
+                "story_status": persisted_story.get("status"),
+                "current_beat_id": persisted_story.get("current_beat_id"),
+                "story_plan_active": _story_plan_active,
+            },
+            level="DEFAULT" if _story_plan_active else "WARNING",
+        )
         if _story_plan_active:
-            director.set_story_context(
-                ss.get_current_beat_info(persisted_story)
+            beat_info = ss.get_current_beat_info(persisted_story)
+            director.set_story_context(beat_info)
+            lf_ctx.story_id = str(
+                beat_info.get("story_id", persisted_story.get("story_id", ""))
             )
+            lf_ctx.beat_id = str(beat_info.get("current_beat_id", ""))
 
         # ── 两阶段调度：故事计划模式走 DIRECT → RESOLVE ──
         if _story_plan_active:
-            return _tick_two_stage(state, user_message, source)
+            result = _tick_two_stage(
+                state, user_message, source, lf_ctx=lf_ctx
+            )
+            log_event(
+                lf_ctx,
+                "room.tick_exit",
+                output_data={
+                    "ok": result.get("ok"),
+                    "error": result.get("error"),
+                    "output_count": len(result.get("output") or []),
+                    "roles": [
+                        item.get("role")
+                        for item in (result.get("output") or [])
+                    ],
+                },
+            )
+            lf_flush(lf_ctx)
+            return result
 
         if os.environ.get("YANGJIAN_ALLOW_LEGACY_MODE") != "1":
-            return {
+            result = {
                 "ok": False,
                 "error": "story_plan_not_active",
                 "output": [{
@@ -301,6 +391,14 @@ def tick(
                     "text": "【故事计划未激活，已阻止旧版导演直接修改状态】",
                 }],
             }
+            log_event(
+                lf_ctx,
+                "room.tick_blocked",
+                output_data=result,
+                level="ERROR",
+            )
+            lf_flush(lf_ctx)
+            return result
 
         # ── 传统模式（仅显式兼容开关启用） ──
         decision = director.decide(state, user_message)
@@ -419,6 +517,11 @@ def tick(
             room_llm.clear_trace_context()
         except Exception:
             pass
+        log_error(lf_ctx, "room.tick_exception", e, input_data=user_message)
+        try:
+            lf_flush(lf_ctx)
+        except Exception:
+            pass
         traceback.print_exc()
         return {
             "ok": False,
@@ -447,22 +550,37 @@ def tick_with_story(user_message=None, source="cron"):
 # ── 两阶段故事计划 tick ──────────────────────────────────
 
 
-def _tick_two_stage(state, user_message=None, source="cron"):
+def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
     """故事计划模式的两阶段 tick：DIRECT → Agent行动 → RESOLVE → Room保存。"""
     import story_state as ss
 
     # Phase 0: 更新 beat_info 缓存
     ss_state = ss.load_state()
     if ss_state.get("status") != "active":
+        log_event(
+            lf_ctx or LangfuseCtx(),
+            "room.two_stage_inactive",
+            output_data={"status": ss_state.get("status")},
+            level="WARNING",
+        )
         return _tick_traditional_fallback(state, user_message, source)
 
     # 初始化 Langfuse 日志上下文
-    from langfuse_logger import LangfuseCtx, log_state_change, flush as lf_flush
-    lf_ctx = LangfuseCtx(
-        tick=state.get("tick", 0) + 1,
-        story_id=ss_state.get("story_id", ss_state.get("current_beat_id", "story_1")),
-        beat_id=ss_state.get("current_beat_id", ""),
-    )
+    if lf_ctx is None:
+        lf_ctx = LangfuseCtx(
+            tick=state.get("tick", 0) + 1,
+            story_id=ss_state.get("story_id", ss_state.get("current_beat_id", "story_1")),
+            beat_id=ss_state.get("current_beat_id", ""),
+            source=source,
+        )
+    else:
+        lf_ctx.tick = state.get("tick", 0) + 1
+        lf_ctx.story_id = str(
+            ss_state.get("story_id", ss_state.get("current_beat_id", "story_1"))
+        )
+        lf_ctx.beat_id = str(ss_state.get("current_beat_id", ""))
+        lf_ctx.source = source
+        lf_ctx.turn_id = f"turn_{lf_ctx.tick}"
     import llm as room_llm
     room_llm.set_trace_context(lf_ctx)
 
@@ -497,6 +615,18 @@ def _tick_two_stage(state, user_message=None, source="cron"):
         for profile in profile_specs.values()
     ]
     director.set_story_context(bi)
+    log_event(
+        lf_ctx,
+        "room.phase0_context",
+        output_data={
+            "beat_id": bi.get("current_beat_id"),
+            "active_npcs": active_npcs,
+            "npc_profiles": bi.get("npc_profiles"),
+            "allowed_information_count": len(bi.get("allowed_information", [])),
+            "user_message": user_message,
+            "source": source,
+        },
+    )
 
     # Phase 1: DIRECTOR DIRECT
     room_ref = contracts.AgentRef(
@@ -558,10 +688,31 @@ def _tick_two_stage(state, user_message=None, source="cron"):
             },
         ),
     )
-    direct_response = director.handle_direct(direct_request)
+    with room_phase(
+        lf_ctx,
+        "room.phase1_direct",
+        input_data={"user_message": user_message, "beat_id": bi.get("current_beat_id")},
+    ):
+        direct_response = director.handle_direct(direct_request)
     directive = contracts.to_dict(direct_response.payload)
     directive["current_story_id"] = bi.get("story_id", "story_1")
     directive["current_beat"] = bi.get("current_beat_id", "")
+    log_event(
+        lf_ctx,
+        "room.directive",
+        output_data={
+            "directive_id": directive.get("directive_id"),
+            "user_turn": directive.get("user_turn"),
+            "resolve_gate": directive.get("resolve_gate"),
+            "actor_task_targets": [
+                task.get("target_agent_id")
+                for task in directive.get("actor_tasks", [])
+                if isinstance(task, dict)
+            ],
+            "narration_request": bool(directive.get("narration_request")),
+            "desired_progress": directive.get("desired_progress"),
+        },
+    )
 
     # NPC Manager 不是 Agent。Room 在 Actor 执行前确定性应用 Director 命令。
     npc_command_results = []
@@ -600,118 +751,177 @@ def _tick_two_stage(state, user_message=None, source="cron"):
     # Phase 2: Actor Pool 行动。Narrator 不在此对象池中。
     actor_results: list[dict[str, Any]] = []
     if act_required:
-        for raw_task in directive.get("actor_tasks", []):
-            if not isinstance(raw_task, dict):
-                continue
-            target = str(raw_task.get("target_agent_id", ""))
-            visible_facts = tuple(
-                contracts.FactRef(
-                    fact_id=str(
-                        info.get("fact_id", info)
-                        if isinstance(info, dict)
-                        else info
-                    ),
-                    text=str(
-                        info.get("text", info)
-                        if isinstance(info, dict)
-                        else info
-                    ),
-                    visibility=str(
-                        info.get("visibility", "public")
-                        if isinstance(info, dict)
-                        else "public"
-                    ),
-                )
-                for info in raw_task.get(
-                    "visible_facts", raw_task.get("information_ids", [])
-                )
-            )
-            try:
-                task = contracts.AgentTask(
-                    task_id=str(raw_task.get("task_id", "")),
-                    target_agent_id=target,
-                    objective=str(raw_task.get("objective", "")),
-                    source_reference=str(
-                        raw_task.get("source_reference")
-                        or bi.get("current_beat_id", "")
-                    ),
-                    visible_facts=visible_facts,
-                    allowed_actions=tuple(
-                        raw_task.get("allowed_actions", ("speak", "act"))
-                    ),
-                    constraints=tuple(raw_task.get("constraints", ())),
-                    success_condition=str(
-                        raw_task.get(
-                            "success_condition",
-                            "产生符合角色的行动或明确不行动原因",
-                        )
-                    ),
-                )
-            except ValueError:
-                continue
-            if target in {"yangjian", "杨戬"}:
-                perception_text = state_manager.get_perception(
-                    "yangjian", state, ""
-                )
-                perception = tuple(
-                    (
-                        contracts.FactRef(
-                            fact_id="room_perception",
-                            text=perception_text,
-                            visibility="private",
+        with room_phase(
+            lf_ctx,
+            "room.phase2_act",
+            input_data={
+                "act_required": act_required,
+                "task_count": len(directive.get("actor_tasks", [])),
+            },
+        ):
+            for raw_task in directive.get("actor_tasks", []):
+                if not isinstance(raw_task, dict):
+                    continue
+                target = str(raw_task.get("target_agent_id", ""))
+                visible_facts = tuple(
+                    contracts.FactRef(
+                        fact_id=str(
+                            info.get("fact_id", info)
+                            if isinstance(info, dict)
+                            else info
                         ),
-                        *visible_facts,
+                        text=str(
+                            info.get("text", info)
+                            if isinstance(info, dict)
+                            else info
+                        ),
+                        visibility=str(
+                            info.get("visibility", "public")
+                            if isinstance(info, dict)
+                            else "public"
+                        ),
                     )
-                    if perception_text.strip()
-                    else visible_facts
+                    for info in raw_task.get(
+                        "visible_facts", raw_task.get("information_ids", [])
+                    )
                 )
-                actor_ref = contracts.AgentRef(
-                    agent_id="yangjian", kind=contracts.AgentKind.ACTOR
+                try:
+                    task = contracts.AgentTask(
+                        task_id=str(raw_task.get("task_id", "")),
+                        target_agent_id=target,
+                        objective=str(raw_task.get("objective", "")),
+                        source_reference=str(
+                            raw_task.get("source_reference")
+                            or bi.get("current_beat_id", "")
+                        ),
+                        visible_facts=visible_facts,
+                        allowed_actions=tuple(
+                            raw_task.get("allowed_actions", ("speak", "act"))
+                        ),
+                        constraints=tuple(raw_task.get("constraints", ())),
+                        success_condition=str(
+                            raw_task.get(
+                                "success_condition",
+                                "产生符合角色的行动或明确不行动原因",
+                            )
+                        ),
+                    )
+                except ValueError as exc:
+                    log_event(
+                        lf_ctx,
+                        "room.actor_task_invalid",
+                        input_data=raw_task,
+                        output_data={"error": str(exc)},
+                        level="WARNING",
+                    )
+                    continue
+                log_event(
+                    lf_ctx,
+                    "room.actor_task_start",
+                    input_data={
+                        "target": target,
+                        "task_id": task.task_id,
+                        "objective": task.objective,
+                    },
                 )
-                actor_request = contracts.new_message(
-                    turn_id=turn_id,
-                    story_id=str(bi.get("story_id", "story_1")),
-                    beat_id=str(bi.get("current_beat_id", "")),
-                    phase=contracts.Phase.ACT,
-                    sender=room_ref,
-                    recipient=actor_ref,
-                    message_type="yangjian.turn.input",
-                    correlation_id=direct_response.message_id,
-                    payload=contracts.YangJianTurnInput(
-                        task=task,
-                        scene={"id": bi.get("current_beat_id", "")},
-                        public_room_history=public_history_tuple,
-                        perception=perception,
-                    ),
+                try:
+                    if target in {"yangjian", "杨戬"}:
+                        perception_text = state_manager.get_perception(
+                            "yangjian", state, ""
+                        )
+                        perception = tuple(
+                            (
+                                contracts.FactRef(
+                                    fact_id="room_perception",
+                                    text=perception_text,
+                                    visibility="private",
+                                ),
+                                *visible_facts,
+                            )
+                            if perception_text.strip()
+                            else visible_facts
+                        )
+                        actor_ref = contracts.AgentRef(
+                            agent_id="yangjian", kind=contracts.AgentKind.ACTOR
+                        )
+                        actor_request = contracts.new_message(
+                            turn_id=turn_id,
+                            story_id=str(bi.get("story_id", "story_1")),
+                            beat_id=str(bi.get("current_beat_id", "")),
+                            phase=contracts.Phase.ACT,
+                            sender=room_ref,
+                            recipient=actor_ref,
+                            message_type="yangjian.turn.input",
+                            correlation_id=direct_response.message_id,
+                            payload=contracts.YangJianTurnInput(
+                                task=task,
+                                scene={"id": bi.get("current_beat_id", "")},
+                                public_room_history=public_history_tuple,
+                                perception=perception,
+                            ),
+                        )
+                        result = contracts.to_dict(
+                            yangjian.handle_message(actor_request).payload
+                        )
+                    else:
+                        turn_input = npc.build_structured_turn_input(
+                            target,
+                            task=task,
+                            scene={"id": bi.get("current_beat_id", "")},
+                            public_room_history=public_history_tuple,
+                            perception=visible_facts,
+                        )
+                        actor_request = contracts.new_message(
+                            turn_id=turn_id,
+                            story_id=str(bi.get("story_id", "story_1")),
+                            beat_id=str(bi.get("current_beat_id", "")),
+                            phase=contracts.Phase.ACT,
+                            sender=room_ref,
+                            recipient=contracts.AgentRef(
+                                agent_id=target, kind=contracts.AgentKind.ACTOR
+                            ),
+                            message_type="npc.turn.input",
+                            correlation_id=direct_response.message_id,
+                            payload=turn_input,
+                        )
+                        result = contracts.to_dict(
+                            npc.handle_agent_message(actor_request).payload
+                        )
+                except Exception as exc:
+                    log_error(
+                        lf_ctx,
+                        "room.actor_exception",
+                        exc,
+                        input_data={"target": target, "task_id": task.task_id},
+                    )
+                    raise
+                log_event(
+                    lf_ctx,
+                    "room.actor_task_done",
+                    output_data={
+                        "target": target,
+                        "kind": result.get("kind"),
+                        "result_id": result.get("result_id"),
+                    },
                 )
-                result = contracts.to_dict(
-                    yangjian.handle_message(actor_request).payload
-                )
-            else:
-                turn_input = npc.build_structured_turn_input(
-                    target,
-                    task=task,
-                    scene={"id": bi.get("current_beat_id", "")},
-                    public_room_history=public_history_tuple,
-                    perception=visible_facts,
-                )
-                actor_request = contracts.new_message(
-                    turn_id=turn_id,
-                    story_id=str(bi.get("story_id", "story_1")),
-                    beat_id=str(bi.get("current_beat_id", "")),
-                    phase=contracts.Phase.ACT,
-                    sender=room_ref,
-                    recipient=contracts.AgentRef(
-                        agent_id=target, kind=contracts.AgentKind.ACTOR
-                    ),
-                    message_type="npc.turn.input",
-                    correlation_id=direct_response.message_id,
-                    payload=turn_input,
-                )
-                result = contracts.to_dict(
-                    npc.handle_agent_message(actor_request).payload
-                )
-            actor_results.append(result)
+                actor_results.append(result)
+    else:
+        log_event(
+            lf_ctx,
+            "room.phase2_act_skipped",
+            output_data={"reason": resolve_gate.get("reason")},
+        )
+
+    log_event(
+        lf_ctx,
+        "room.resolve_gate",
+        output_data={
+            "resolve_required": resolve_required,
+            "act_required": act_required,
+            "actor_result_count": len(actor_results),
+            "reason": resolve_gate.get("reason"),
+        },
+    )
 
     forbidden_fragments = list(bi.get("forbidden_reveals", []))
     for task in directive.get("actor_tasks", []):
@@ -719,60 +929,80 @@ def _tick_two_stage(state, user_message=None, source="cron"):
 
     resolve_response = None
     if resolve_required:
-        resolve_request = contracts.new_message(
-            turn_id=turn_id,
-            story_id=str(bi.get("story_id", "story_1")),
-            beat_id=str(bi.get("current_beat_id", "")),
-            phase=contracts.Phase.RESOLVE,
-            sender=room_ref,
-            recipient=director_ref,
-            message_type="director.resolve.input",
-            correlation_id=direct_response.message_id,
-            payload=contracts.DirectorResolveInput(
-                directive_id=str(directive["directive_id"]),
-                story_cursor={
-                    "story_id": bi.get("story_id", "story_1"),
-                    "beat_id": bi.get("current_beat_id", ""),
-                    "allowed_information": list(
-                        bi.get("allowed_information", [])
+        with room_phase(
+            lf_ctx,
+            "room.phase3_resolve",
+            input_data={
+                "actor_result_ids": [
+                    item.get("result_id") for item in actor_results
+                ]
+            },
+        ):
+            resolve_request = contracts.new_message(
+                turn_id=turn_id,
+                story_id=str(bi.get("story_id", "story_1")),
+                beat_id=str(bi.get("current_beat_id", "")),
+                phase=contracts.Phase.RESOLVE,
+                sender=room_ref,
+                recipient=director_ref,
+                message_type="director.resolve.input",
+                correlation_id=direct_response.message_id,
+                payload=contracts.DirectorResolveInput(
+                    directive_id=str(directive["directive_id"]),
+                    story_cursor={
+                        "story_id": bi.get("story_id", "story_1"),
+                        "beat_id": bi.get("current_beat_id", ""),
+                        "allowed_information": list(
+                            bi.get("allowed_information", [])
+                        ),
+                    },
+                    world_snapshot=dict(state),
+                    actor_results=tuple(
+                        contracts.actor_turn_result_from_dict(item)
+                        for item in actor_results
                     ),
-                },
-                world_snapshot=dict(state),
-                actor_results=tuple(
-                    contracts.actor_turn_result_from_dict(item)
-                    for item in actor_results
+                    user_event={
+                        "type": "user_message",
+                        "text": user_message or "",
+                    },
+                    user_turn=dict(directive.get("user_turn", {})),
+                    unlocked_transitions=tuple(
+                        bi.get("available_transitions", ())
+                    ),
+                    allowed_state_operations=(
+                        "set_world_attribute",
+                        "move_item",
+                        "reveal_fact",
+                        "set_character_state",
+                        "advance_beat",
+                    ),
                 ),
-                user_event={
-                    "type": "user_message",
-                    "text": user_message or "",
-                },
-                user_turn=dict(directive.get("user_turn", {})),
-                unlocked_transitions=tuple(
-                    bi.get("available_transitions", ())
-                ),
-                allowed_state_operations=(
-                    "set_world_attribute",
-                    "move_item",
-                    "reveal_fact",
-                    "set_character_state",
-                    "advance_beat",
-                ),
-            ),
-        )
-        resolve_response = director.handle_resolve(resolve_request)
-        resolution = contracts.to_dict(resolve_response.payload)
-        resolution["state_changes"] = resolution.pop("state_operations", [])
-        resolution["next_beat"] = resolution.pop("next_beat_id", None)
-        for decision in resolution.get("decisions", []):
-            if "result_id" in decision:
-                decision["proposal_id"] = decision.pop("result_id")
-        outputs, confirmed_events = _apply_actor_resolution(
-            actor_results, resolution, forbidden_fragments
-        )
-        confirmed_events.extend(
-            _confirmed_events_from_user_outcome(
-                resolution.get("user_outcome")
             )
+            resolve_response = director.handle_resolve(resolve_request)
+            resolution = contracts.to_dict(resolve_response.payload)
+            resolution["state_changes"] = resolution.pop("state_operations", [])
+            resolution["next_beat"] = resolution.pop("next_beat_id", None)
+            for decision in resolution.get("decisions", []):
+                if "result_id" in decision:
+                    decision["proposal_id"] = decision.pop("result_id")
+            outputs, confirmed_events = _apply_actor_resolution(
+                actor_results, resolution, forbidden_fragments
+            )
+            confirmed_events.extend(
+                _confirmed_events_from_user_outcome(
+                    resolution.get("user_outcome")
+                )
+            )
+        log_event(
+            lf_ctx,
+            "room.resolution",
+            output_data={
+                "decision_count": len(resolution.get("decisions", [])),
+                "continuation": resolution.get("continuation"),
+                "user_outcome": resolution.get("user_outcome"),
+                "output_count": len(outputs),
+                "confirmed_event_count": len(confirmed_events),
+            },
         )
     else:
         inline_effects = directive.get("inline_effects") or {}
@@ -796,6 +1026,15 @@ def _tick_two_stage(state, user_message=None, source="cron"):
                 inline_effects.get("user_feedback")
             )
         )
+        log_event(
+            lf_ctx,
+            "room.fast_path",
+            output_data={
+                "output_count": len(outputs),
+                "confirmed_event_count": len(confirmed_events),
+                "inline_effects": inline_effects,
+            },
+        )
 
     result_by_id = {
         item.get("result_id"): item for item in actor_results
@@ -816,70 +1055,95 @@ def _tick_two_stage(state, user_message=None, source="cron"):
 
     narration_spec = _select_narration_spec(directive, resolution)
     if narration_spec:
-        narration_events = list(confirmed_events)
-        if not narration_events:
-            narration_events = _synthetic_confirmed_events_for_narration(
-                narration_spec
-            )
-        request = contracts.NarrationRequest(
-            purpose=str(narration_spec.get("purpose", "visible_action")),
-            timing=str(narration_spec.get("timing", "after_dialogue")),
-            visible_fact_ids=tuple(
-                narration_spec.get("visible_fact_ids", ())
-            ),
-            max_characters=int(narration_spec.get("max_characters", 100)),
-            style_profile=str(
-                narration_spec.get("style_profile", "concise")
-            ),
-            brief=str(narration_spec.get("brief", "")),
-            scene_facts=tuple(narration_spec.get("scene_facts", ())),
-        )
-        visible_facts = tuple(
-            contracts.FactRef(fact_id=fact_id, text=fact_id)
-            for fact_id in request.visible_fact_ids
-        )
-        narrator_request_message = contracts.new_message(
-            turn_id=turn_id,
-            story_id=str(bi.get("story_id", "story_1")),
-            beat_id=str(bi.get("current_beat_id", "")),
-            phase=contracts.Phase.NARRATE,
-            sender=room_ref,
-            recipient=contracts.AgentRef(
-                agent_id="narrator",
-                kind=contracts.AgentKind.NARRATOR,
-            ),
-            message_type="narrator.input",
-            correlation_id=(
-                resolve_response.message_id
-                if resolve_response is not None
-                else direct_response.message_id
-            ),
-            payload=contracts.NarratorInput(
-                narration_request=request,
-                scene={"id": bi.get("current_beat_id", "")},
-                confirmed_events=tuple(narration_events),
-                visible_facts=visible_facts,
-                previous_published_messages=public_history_tuple,
-            ),
-        )
-        draft = contracts.to_dict(
-            narrator.handle_message(narrator_request_message).payload
-        )
-        narration = str(draft.get("text", ""))
-        if (
-            narration
-            and not draft.get("contains_dialogue")
-            and not _contains_forbidden(narration, forbidden_fragments)
+        with room_phase(
+            lf_ctx,
+            "room.phase4_narrate",
+            input_data={
+                "purpose": narration_spec.get("purpose"),
+                "timing": narration_spec.get("timing"),
+                "confirmed_event_count": len(confirmed_events),
+            },
         ):
-            narration_output = {
-                "role": "旁白",
-                "text": narration,
-                "kind": "narration",
-            }
-            if request.timing == "before_dialogue":
-                outputs.insert(0, narration_output)
-            else:
-                outputs.append(narration_output)
+            narration_events = list(confirmed_events)
+            if not narration_events:
+                narration_events = _synthetic_confirmed_events_for_narration(
+                    narration_spec
+                )
+            request = contracts.NarrationRequest(
+                purpose=str(narration_spec.get("purpose", "visible_action")),
+                timing=str(narration_spec.get("timing", "after_dialogue")),
+                visible_fact_ids=tuple(
+                    narration_spec.get("visible_fact_ids", ())
+                ),
+                max_characters=int(narration_spec.get("max_characters", 100)),
+                style_profile=str(
+                    narration_spec.get("style_profile", "concise")
+                ),
+                brief=str(narration_spec.get("brief", "")),
+                scene_facts=tuple(narration_spec.get("scene_facts", ())),
+            )
+            visible_facts = tuple(
+                contracts.FactRef(fact_id=fact_id, text=fact_id)
+                for fact_id in request.visible_fact_ids
+            )
+            narrator_request_message = contracts.new_message(
+                turn_id=turn_id,
+                story_id=str(bi.get("story_id", "story_1")),
+                beat_id=str(bi.get("current_beat_id", "")),
+                phase=contracts.Phase.NARRATE,
+                sender=room_ref,
+                recipient=contracts.AgentRef(
+                    agent_id="narrator",
+                    kind=contracts.AgentKind.NARRATOR,
+                ),
+                message_type="narrator.input",
+                correlation_id=(
+                    resolve_response.message_id
+                    if resolve_response is not None
+                    else direct_response.message_id
+                ),
+                payload=contracts.NarratorInput(
+                    narration_request=request,
+                    scene={"id": bi.get("current_beat_id", "")},
+                    confirmed_events=tuple(narration_events),
+                    visible_facts=visible_facts,
+                    previous_published_messages=public_history_tuple,
+                ),
+            )
+            draft = contracts.to_dict(
+                narrator.handle_message(narrator_request_message).payload
+            )
+            narration = str(draft.get("text", ""))
+            if (
+                narration
+                and not draft.get("contains_dialogue")
+                and not _contains_forbidden(narration, forbidden_fragments)
+            ):
+                narration_output = {
+                    "role": "旁白",
+                    "text": narration,
+                    "kind": "narration",
+                }
+                if request.timing == "before_dialogue":
+                    outputs.insert(0, narration_output)
+                else:
+                    outputs.append(narration_output)
+            log_event(
+                lf_ctx,
+                "room.narration_result",
+                output_data={
+                    "chars": len(narration),
+                    "accepted": bool(narration)
+                    and not draft.get("contains_dialogue"),
+                    "timing": request.timing,
+                },
+            )
+    else:
+        log_event(
+            lf_ctx,
+            "room.narration_skipped",
+            output_data={"confirmed_event_count": len(confirmed_events)},
+        )
 
     order = [output["role"] for output in outputs] + ["用户"]
 
@@ -921,7 +1185,6 @@ def _tick_two_stage(state, user_message=None, source="cron"):
         if key and value is not None:
             if key in {"weather", "mood", "world_day"}:
                 state = state_manager.apply_changes(state, {key: value})
-            from langfuse_logger import log_state_change
             log_state_change(lf_ctx, key, value, source="resolve")
             if key.startswith("item_"):
                 item = key.replace("item_", "")
@@ -973,6 +1236,23 @@ def _tick_two_stage(state, user_message=None, source="cron"):
     }
 
     room_llm.clear_trace_context()
+    log_event(
+        lf_ctx,
+        "room.publish",
+        output_data={
+            "ok": True,
+            "roles": order,
+            "outputs": [
+                {
+                    "role": item.get("role"),
+                    "kind": item.get("kind"),
+                    "chars": len(str(item.get("text", ""))),
+                    "preview": str(item.get("text", ""))[:120],
+                }
+                for item in outputs
+            ],
+        },
+    )
     return {
         "ok": True,
         "output": outputs,

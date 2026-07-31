@@ -46,7 +46,6 @@ class AgentIdAliasTests(unittest.TestCase):
         from agent_schemas.director import (
             DirectorNarrationOutput,
             DirectorTaskOutput,
-            InlineEffectsOutput,
             ObservedUserIntentOutput,
             ResolveGateOutput,
             UserTurnDisclosureOutput,
@@ -57,39 +56,29 @@ class AgentIdAliasTests(unittest.TestCase):
         token = set_available_targets(["yangjian"])
         try:
             task = DirectorTaskOutput(
-                task_id="t1",
                 target="杨戬",
-                source_reference="beat_1",
                 objective="回应",
-                success_condition="有回应",
             )
             self.assertEqual("yangjian", task.target)
 
             turn = UserTurnOutput(
                 kind="dialogue",
-                target="杨戬",
-                disclosure=UserTurnDisclosureOutput(required=False, mode="none"),
+                disclosure=UserTurnDisclosureOutput(required=False),
             )
-            self.assertEqual("yangjian", turn.target)
 
             payload = DirectorDirectiveOutput(
-                chapter="c1",
-                beat="b1",
                 observed_user_intent=ObservedUserIntentOutput(
-                    intent="continue", confidence=0.5
+                    intent="continue"
                 ),
                 user_turn=turn,
                 resolve_gate=ResolveGateOutput(
-                    required=True, reason="default_full_path", act_required=True
+                    required=True, act_required=True
                 ),
-                inline_effects=InlineEffectsOutput(),
                 tasks=[task],
-                desired_progress="maintain",
                 narration=DirectorNarrationOutput(
                     required=False,
                     purpose="none",
                     timing="none",
-                    max_characters=0,
                 ),
             )
             self.assertEqual("yangjian", payload.tasks[0].target)

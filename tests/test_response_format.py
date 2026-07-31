@@ -59,7 +59,15 @@ class ResponseFormatConversionTests(unittest.TestCase):
         self.assertEqual(
             {"type": "json_object"}, captured.get("response_format")
         )
-        self.assertIn("JSON Schema", captured.get("system", ""))
+        # Schema hint is now injected into the user message, not system prompt
+        messages = captured.get("messages", [])
+        user_content = ""
+        for msg in messages:
+            if msg.get("role") == "user":
+                user_content = msg.get("content", "")
+        self.assertIn("JSON Schema", user_content)
+        # System prompt should stay clean (no schema hint)
+        self.assertNotIn("JSON Schema", captured.get("system", ""))
 
 
 if __name__ == "__main__":

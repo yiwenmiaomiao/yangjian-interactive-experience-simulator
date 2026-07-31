@@ -64,6 +64,56 @@ def _is_unsupported_response_format_error(exc: BaseException, body: str = "") ->
     )
 
 
+def _extract_json_from_reasoning(reasoning: str) -> str:
+    """Try to extract a JSON object from reasoning_content.
+
+    DeepSeek reasoning models sometimes put the full JSON output inside
+    reasoning_content instead of content. This recovers it.
+
+    Handles:
+    - Pure JSON in reasoning
+    - JSON wrapped in ```json blocks
+    - JSON embedded in prose (finds first { to last })
+    """
+    text = reasoning.strip()
+    if not text:
+        return ""
+    # Strip markdown code fences
+    for prefix in ("```json", "```"):
+        if prefix in text:
+            text = text.split(prefix, 1)[1]
+            text = text.rsplit("```", 1)[0]
+            break
+    text = text.strip()
+    # Try direct parse first
+    try:
+        import json as _json
+        _json.loads(text)
+        return text
+    except (ValueError, TypeError):
+        pass
+    # Try to find a JSON object boundary (first { to matching last })
+    first = text.find("{")
+    if first == -1:
+        return ""
+    # Walk forward to find the matching closing brace
+    depth = 0
+    for i in range(first, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[first : i + 1]
+                try:
+                    import json as _json
+                    _json.loads(candidate)
+                    return candidate
+                except (ValueError, TypeError):
+                    return ""
+    return ""
+
+
 def call(
     system,
     messages,
@@ -140,17 +190,33 @@ def call(
                 "refusal": message.get("refusal"),
             }
             if not str(result).strip():
-                # Keep a compact raw choice for empty-content diagnosis.
-                meta["empty_content"] = True
-                meta["raw_choice"] = choice
-                print(
-                    f"[llm] empty content agent={agent_id or '-'} "
-                    f"finish_reason={meta.get('finish_reason')} "
-                    f"usage={meta.get('usage')} "
-                    f"refusal={meta.get('refusal')!r} "
-                    f"choice={json.dumps(choice, ensure_ascii=False)[:500]}",
-                    flush=True,
-                )
+                # DeepSeek reasoning models sometimes put the full JSON output
+                # in reasoning_content but leave content empty. Try to recover.
+                reasoning = message.get("reasoning_content") or ""
+                if reasoning.strip():
+                    extracted = _extract_json_from_reasoning(reasoning)
+                    if extracted:
+                        result = extracted
+                        meta["recovered_from_reasoning"] = True
+                        meta["empty_content"] = False
+                        print(
+                            f"[llm] recovered from reasoning_content "
+                            f"agent={agent_id or '-'} "
+                            f"len={len(result)}",
+                            flush=True,
+                        )
+                if not str(result).strip():
+                    # Keep a compact raw choice for empty-content diagnosis.
+                    meta["empty_content"] = True
+                    meta["raw_choice"] = choice
+                    print(
+                        f"[llm] empty content agent={agent_id or '-'} "
+                        f"finish_reason={meta.get('finish_reason')} "
+                        f"usage={meta.get('usage')} "
+                        f"refusal={meta.get('refusal')!r} "
+                        f"choice={json.dumps(choice, ensure_ascii=False)[:500]}",
+                        flush=True,
+                    )
             # finish_reason=length means the output was truncated by max_tokens.
             # Returning truncated text as-is causes cascading parse failures and
             # pointless retries with the same max_tokens. Surface it as an error.

@@ -135,7 +135,7 @@ def draft(turn_input: contracts.NarratorInput) -> dict:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=300,
+            max_tokens=800,
         )
         text = output.text.strip()
     except StructuredOutputError:
@@ -246,7 +246,7 @@ def speak(director_decision, state, max_chars: int = 200):
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,  # 极低温度，严格遵循约束
-        max_tokens=300,
+        max_tokens=800,
     )
 
     # 如果模型返回空或只返回空字符串，返回空

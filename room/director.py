@@ -116,6 +116,7 @@ narration 是用户的眼睛。用户只能通过 narration 感知环境。角�
 - 场景变化：用户进入新地点、环境突变（narration_type="场景"）
 - 出现新线索：环境中有值得注意的细节（narration_type="线索"）
 - beat 切换：进入新 beat 时如果环境与上一个 beat 不同（narration_type="场景"）
+- 用户独处：当前场景只有用户一人（杨戬离开、NPC不在场），必须通过 narration 描述环境变化或线索，引导用户进一步行动（narration_type="线索"或"场景"）
 
 ### 什么时候可选触发
 - 氛围渲染：紧张/悲伤/转折时刻（narration_type="氛围"）

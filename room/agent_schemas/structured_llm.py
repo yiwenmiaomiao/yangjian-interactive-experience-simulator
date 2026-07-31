@@ -102,18 +102,29 @@ def call_structured(
     max_retries: int = 2,
     target_pool: Sequence[str] | None = None,
 ) -> T:
-    """Call the LLM and validate the response with a Pydantic output model."""
+    """Call the LLM and validate the response with a Pydantic output model.
+
+    Schema hint is appended to the first user message (not system prompt)
+    to reduce prefill cost — system prompt stays lean and cacheable.
+    """
     response_format, schema_hint = schema_to_json_object_format(
         model, target_pool=target_pool
     )
-    system_with_schema = f"{system.rstrip()}\n\n{schema_hint}"
     attempt_messages = list(messages)
+    # Inject schema hint into the last user message instead of system prompt
+    # so the system prompt stays small for KV-cache reuse across agents.
+    if attempt_messages:
+        last = dict(attempt_messages[-1])
+        last["content"] = f"{last.get('content', '')}\n\n{schema_hint}"
+        attempt_messages[-1] = last
+    else:
+        attempt_messages = [{"role": "user", "content": schema_hint}]
     last_error: ValidationError | None = None
 
     for attempt in range(max_retries + 1):
         raw = llm.call(
             agent_id=agent_id,
-            system=system_with_schema,
+            system=system,
             messages=attempt_messages,
             temperature=temperature,
             max_tokens=max_tokens,

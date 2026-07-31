@@ -17,19 +17,12 @@ class ObservedUserIntentOutput(BaseModel):
     model_config = _CFG
 
     intent: str = Field(min_length=1)
-    confidence: float = Field(ge=0.0, le=1.0)
 
 
 class UserTurnDisclosureOutput(BaseModel):
     model_config = _CFG
 
     required: bool
-    mode: Literal[
-        "none",
-        "environment",
-        "discovery",
-        "confirmation",
-    ]
 
 
 class UserTurnOutput(BaseModel):
@@ -42,20 +35,13 @@ class UserTurnOutput(BaseModel):
         "passive",
         "meta",
     ]
-    target: str | None = None
     disclosure: UserTurnDisclosureOutput
-
-    @field_validator("target", mode="before")
-    @classmethod
-    def _normalize_target(cls, value: Any) -> str | None:
-        return coerce_target_in_pool(value, allow_none=True)
 
 
 class ResolveGateOutput(BaseModel):
     model_config = _CFG
 
     required: bool
-    reason: str = Field(min_length=1)
     act_required: bool
 
 
@@ -93,13 +79,11 @@ class InlineEffectsOutput(BaseModel):
 class DirectorTaskOutput(BaseModel):
     model_config = _CFG
 
-    task_id: str = Field(min_length=1)
     target: str = Field(
         min_length=1,
         description="Canonical English agent_id (yangjian), never display name",
     )
     objective: str = Field(min_length=1)
-    information_ids: list[str] = Field(default_factory=list)
 
     @field_validator("target", mode="before")
     @classmethod
@@ -116,10 +100,7 @@ class DirectorNarrationOutput(BaseModel):
     purpose: str
     timing: str
     narration_type: str = "旁白"
-    visible_facts: list[str] = Field(default_factory=list)
-    max_characters: int = Field(ge=0, le=200)
     brief: str = ""
-    scene_facts: list[str] = Field(default_factory=list)
 
 
 class NPCCommandOutput(BaseModel):
@@ -153,12 +134,19 @@ class NPCCommandOutput(BaseModel):
 class DirectorDirectiveOutput(BaseModel):
     """LLM output for DIRECT phase.
 
-    Removed redundant fields the LLM no longer needs to generate:
-    - mode/chapter/beat: Room always overrides from beat_info
-    - selected_side_arc: never used in practice
-    - fallback_world_event: never consumed by room.py
-    - source_reference: Room always sets to beat_id
-    - success_condition: has default, Room doesn't depend on LLM value
+    Trimmed to only fields Room actually reads for logic decisions.
+    Removed fields are auto-filled by Room:
+    - mode/chapter/beat: Room overrides from beat_info
+    - selected_side_arc/fallback_world_event: never used
+    - source_reference/success_condition: Room sets defaults
+    - npc_commands: Room auto-generates from beat NPC profiles
+    - inline_effects: Room fills default; only fast path uses it
+    - confidence: Room never reads it
+    - user_turn.target/disclosure.mode: Room never reads them
+    - resolve_gate.reason: only used in logs
+    - task_id/information_ids: Room auto-fills
+    - desired_progress: Room only logs it
+    - narration.visible_facts/max_characters/scene_facts: Room/sanitize fills defaults
     """
 
     model_config = _CFG
@@ -166,11 +154,8 @@ class DirectorDirectiveOutput(BaseModel):
     observed_user_intent: ObservedUserIntentOutput
     user_turn: UserTurnOutput
     resolve_gate: ResolveGateOutput
-    inline_effects: InlineEffectsOutput
     tasks: list[DirectorTaskOutput] = Field(default_factory=list)
-    desired_progress: Literal["maintain", "advance", "recover"] = "maintain"
     narration: DirectorNarrationOutput
-    npc_commands: list[NPCCommandOutput] = Field(default_factory=list)
 
 
 class UserOutcomeOutput(BaseModel):

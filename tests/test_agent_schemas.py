@@ -10,7 +10,6 @@ from agent_schemas import (
 from agent_schemas.actor import ActorAbstentionOutput, ActorProposalOutput
 from agent_schemas.director import (
     DirectorNarrationOutput,
-    InlineEffectsOutput,
     ObservedUserIntentOutput,
     ResolveGateOutput,
     UserTurnDisclosureOutput,
@@ -45,33 +44,27 @@ class AgentSchemaTests(unittest.TestCase):
         payload = DirectorDirectiveOutput(
             observed_user_intent=ObservedUserIntentOutput(
                 intent="continue",
-                confidence=0.5,
             ),
             user_turn=UserTurnOutput(
                 kind="dialogue",
-                target=None,
                 disclosure=UserTurnDisclosureOutput(
                     required=False,
-                    mode="none",
                 ),
             ),
             resolve_gate=ResolveGateOutput(
                 required=True,
-                reason="default_full_path",
                 act_required=True,
             ),
-            inline_effects=InlineEffectsOutput(),
-            desired_progress="maintain",
             narration=DirectorNarrationOutput(
                 required=False,
                 purpose="none",
                 timing="none",
-                max_characters=0,
             ),
         )
-        # mode/chapter/beat were removed from LLM output schema;
-        # Room fills them from beat_info. Just verify the model validates.
-        self.assertEqual("maintain", payload.desired_progress)
+        # mode/chapter/beat/desired_progress etc. were removed from
+        # LLM output schema; Room fills them from beat_info.
+        # Just verify the model validates.
+        self.assertEqual("dialogue", payload.user_turn.kind)
 
     def test_narration_output_allows_empty_text(self) -> None:
         self.assertEqual("", NarrationOutput().text)

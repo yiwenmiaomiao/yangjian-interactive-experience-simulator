@@ -131,10 +131,102 @@ class NarrationRequest:
     visible_fact_ids: tuple[str, ...] = ()
     max_characters: int = 100
     style_profile: str = "concise"
+    brief: str = ""
+    scene_facts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not 0 < self.max_characters <= 200:
             raise ValueError("max_characters must be between 1 and 200")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UserTurnDisclosure:
+    required: bool = False
+    mode: str = "none"
+
+    def __post_init__(self) -> None:
+        if self.mode not in {
+            "none",
+            "environment",
+            "discovery",
+            "confirmation",
+        }:
+            raise ValueError(f"Unsupported disclosure mode: {self.mode}")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UserTurn:
+    kind: str
+    target: str | None = None
+    disclosure: UserTurnDisclosure = field(
+        default_factory=lambda: UserTurnDisclosure()
+    )
+
+    def __post_init__(self) -> None:
+        if self.kind not in {
+            "dialogue",
+            "physical_action",
+            "declarative_choice",
+            "passive",
+            "meta",
+        }:
+            raise ValueError(f"Unsupported user turn kind: {self.kind}")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ResolveGate:
+    required: bool = True
+    reason: str = "default_full_path"
+    act_required: bool = True
+
+    def __post_init__(self) -> None:
+        _text(self.reason, "resolve_gate reason")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PresentationRequest:
+    required: bool = False
+    purpose: str = "none"
+    timing: str = "after_dialogue"
+
+    def __post_init__(self) -> None:
+        if self.timing not in {"none", "before_dialogue", "after_dialogue"}:
+            raise ValueError(f"Unsupported presentation timing: {self.timing}")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UserFeedback:
+    outcome_summary: str
+    revealed_fact_ids: tuple[str, ...] = ()
+    presentation: PresentationRequest = field(
+        default_factory=lambda: PresentationRequest()
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InlineEffects:
+    state_operations: tuple[Mapping[str, Any], ...] = ()
+    user_feedback: UserFeedback | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UserOutcome:
+    applies: bool = False
+    result: str = "not_applicable"
+    outcome_summary: str = ""
+    revealed_fact_ids: tuple[str, ...] = ()
+    presentation: PresentationRequest = field(
+        default_factory=lambda: PresentationRequest()
+    )
+
+    def __post_init__(self) -> None:
+        if self.result not in {
+            "accepted",
+            "partial",
+            "failed",
+            "not_applicable",
+        }:
+            raise ValueError(f"Unsupported user outcome result: {self.result}")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -156,6 +248,15 @@ class DirectorDirective:
     directive_id: str
     observed_user_intent: Mapping[str, Any]
     actor_tasks: tuple[AgentTask, ...]
+    user_turn: UserTurn = field(
+        default_factory=lambda: UserTurn(kind="dialogue")
+    )
+    resolve_gate: ResolveGate = field(
+        default_factory=lambda: ResolveGate()
+    )
+    inline_effects: InlineEffects = field(
+        default_factory=lambda: InlineEffects()
+    )
     npc_commands: tuple[NPCCommand, ...] = ()
     desired_progress: str = "maintain"
     selected_side_arc_id: str | None = None
@@ -164,7 +265,15 @@ class DirectorDirective:
 
     def __post_init__(self) -> None:
         _text(self.directive_id, "directive_id")
-        if not self.actor_tasks and not self.npc_commands and not self.fallback_world_event:
+        has_progress = (
+            self.actor_tasks
+            or self.npc_commands
+            or self.fallback_world_event
+            or not self.resolve_gate.act_required
+            or self.inline_effects.state_operations
+            or self.inline_effects.user_feedback is not None
+        )
+        if not has_progress:
             raise ValueError("DirectorDirective must contain an executable next step")
 
 
@@ -301,6 +410,8 @@ class DirectorResolveInput:
     story_cursor: Mapping[str, Any]
     world_snapshot: Mapping[str, Any]
     actor_results: tuple[ActorTurnResult, ...]
+    user_event: Mapping[str, Any] = field(default_factory=dict)
+    user_turn: Mapping[str, Any] = field(default_factory=dict)
     unlocked_transitions: tuple[Mapping[str, Any], ...] = ()
     allowed_state_operations: tuple[str, ...] = ()
 
@@ -310,6 +421,9 @@ class DirectorResolution:
     resolution_id: str
     decisions: tuple[ActorResultDecision, ...]
     continuation: ContinuationPlan
+    user_outcome: UserOutcome = field(
+        default_factory=lambda: UserOutcome()
+    )
     state_operations: tuple[Mapping[str, Any], ...] = ()
     next_beat_id: str | None = None
     progress_result: str = "maintained"
@@ -495,6 +609,87 @@ def agent_task_from_dict(data: Mapping[str, Any]) -> AgentTask:
     )
 
 
+def _presentation_request_from_dict(
+    data: Mapping[str, Any] | None,
+) -> PresentationRequest:
+    if not isinstance(data, Mapping):
+        return PresentationRequest()
+    return PresentationRequest(
+        required=bool(data.get("required", False)),
+        purpose=str(data.get("purpose", "none")),
+        timing=str(data.get("timing", "after_dialogue")),
+    )
+
+
+def _user_turn_from_dict(data: Mapping[str, Any] | None) -> UserTurn:
+    if not isinstance(data, Mapping):
+        return UserTurn(kind="dialogue")
+    disclosure_data = data.get("disclosure")
+    disclosure = (
+        UserTurnDisclosure(
+            required=bool(disclosure_data.get("required", False)),
+            mode=str(disclosure_data.get("mode", "none")),
+        )
+        if isinstance(disclosure_data, Mapping)
+        else UserTurnDisclosure()
+    )
+    target = data.get("target")
+    return UserTurn(
+        kind=str(data.get("kind", "dialogue")),
+        target=str(target) if target else None,
+        disclosure=disclosure,
+    )
+
+
+def _resolve_gate_from_dict(data: Mapping[str, Any] | None) -> ResolveGate:
+    if not isinstance(data, Mapping):
+        return ResolveGate()
+    return ResolveGate(
+        required=bool(data.get("required", True)),
+        reason=str(data.get("reason", "default_full_path")),
+        act_required=bool(data.get("act_required", True)),
+    )
+
+
+def _inline_effects_from_dict(data: Mapping[str, Any] | None) -> InlineEffects:
+    if not isinstance(data, Mapping):
+        return InlineEffects()
+    feedback_data = data.get("user_feedback")
+    user_feedback = None
+    if isinstance(feedback_data, Mapping):
+        user_feedback = UserFeedback(
+            outcome_summary=str(feedback_data.get("outcome_summary", "")),
+            revealed_fact_ids=tuple(
+                feedback_data.get("revealed_fact_ids", ())
+            ),
+            presentation=_presentation_request_from_dict(
+                feedback_data.get("presentation")
+            ),
+        )
+    return InlineEffects(
+        state_operations=tuple(
+            dict(item)
+            for item in data.get("state_operations", ())
+            if isinstance(item, Mapping)
+        ),
+        user_feedback=user_feedback,
+    )
+
+
+def _user_outcome_from_dict(data: Mapping[str, Any] | None) -> UserOutcome:
+    if not isinstance(data, Mapping):
+        return UserOutcome()
+    return UserOutcome(
+        applies=bool(data.get("applies", False)),
+        result=str(data.get("result", "not_applicable")),
+        outcome_summary=str(data.get("outcome_summary", "")),
+        revealed_fact_ids=tuple(data.get("revealed_fact_ids", ())),
+        presentation=_presentation_request_from_dict(
+            data.get("presentation")
+        ),
+    )
+
+
 def director_directive_from_dict(
     data: Mapping[str, Any],
 ) -> DirectorDirective:
@@ -510,6 +705,8 @@ def director_directive_from_dict(
             style_profile=str(
                 narration_data.get("style_profile", "concise")
             ),
+            brief=str(narration_data.get("brief", "")),
+            scene_facts=tuple(narration_data.get("scene_facts", ())),
         )
         if isinstance(narration_data, Mapping)
         else None
@@ -521,6 +718,11 @@ def director_directive_from_dict(
             agent_task_from_dict(item)
             for item in data.get("actor_tasks", ())
             if isinstance(item, Mapping)
+        ),
+        user_turn=_user_turn_from_dict(data.get("user_turn")),
+        resolve_gate=_resolve_gate_from_dict(data.get("resolve_gate")),
+        inline_effects=_inline_effects_from_dict(
+            data.get("inline_effects")
         ),
         npc_commands=tuple(
             NPCCommand(
@@ -672,6 +874,7 @@ def director_resolution_from_dict(
     return DirectorResolution(
         resolution_id=str(data.get("resolution_id", _identifier("resolution"))),
         decisions=tuple(decisions),
+        user_outcome=_user_outcome_from_dict(data.get("user_outcome")),
         state_operations=tuple(
             data.get("state_operations", data.get("state_changes", ()))
         ),

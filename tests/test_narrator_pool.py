@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from agent_schemas import NarrationOutput
 from room import contracts, narrator
 
 
@@ -33,7 +34,9 @@ class NarratorPoolTests(unittest.TestCase):
             ),
         )
         with patch.object(
-            narrator.llm, "call", return_value="夜色渐深。"
+            narrator,
+            "call_structured",
+            return_value=NarrationOutput(text="夜色渐深。"),
         ):
             response = narrator.handle_message(request)
         self.assertEqual(contracts.Phase.NARRATE, response.phase)
@@ -42,7 +45,9 @@ class NarratorPoolTests(unittest.TestCase):
 
     def test_narrator_only_uses_confirmed_events(self) -> None:
         with patch.object(
-            narrator.llm, "call", return_value="门在你面前打开。"
+            narrator,
+            "call_structured",
+            return_value=NarrationOutput(text="门在你面前打开。"),
         ) as call:
             result = narrator.draft(
                 contracts.NarratorInput(

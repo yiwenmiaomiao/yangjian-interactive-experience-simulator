@@ -39,6 +39,20 @@ def directive():
             "intent": "ask_question",
             "confidence": 0.8,
         },
+        "user_turn": {
+            "kind": "dialogue",
+            "target": "yangjian",
+            "disclosure": {"required": False, "mode": "none"},
+        },
+        "resolve_gate": {
+            "required": True,
+            "reason": "default_full_path",
+            "act_required": True,
+        },
+        "inline_effects": {
+            "state_operations": [],
+            "user_feedback": None,
+        },
         "tasks": [
             {
                 "task_id": "task_1",
@@ -93,6 +107,17 @@ def resolution():
             "reason": "已满足推进条件",
             "target_id": "beat_2",
             "world_event": None,
+        },
+        "user_outcome": {
+            "applies": False,
+            "result": "not_applicable",
+            "outcome_summary": "",
+            "revealed_fact_ids": [],
+            "presentation": {
+                "required": False,
+                "purpose": "none",
+                "timing": "after_dialogue",
+            },
         },
     }
 

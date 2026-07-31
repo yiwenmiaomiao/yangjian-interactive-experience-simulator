@@ -41,6 +41,20 @@ class DirectorRuntimeContractTests(unittest.TestCase):
             "chapter": "story_1",
             "beat": "m1",
             "observed_user_intent": {"intent": "continue", "confidence": 0.5},
+            "user_turn": {
+                "kind": "dialogue",
+                "target": None,
+                "disclosure": {"required": False, "mode": "none"},
+            },
+            "resolve_gate": {
+                "required": True,
+                "reason": "default_full_path",
+                "act_required": True,
+            },
+            "inline_effects": {
+                "state_operations": [],
+                "user_feedback": None,
+            },
             "tasks": [{
                 "task_id": "task_1",
                 "target": "yangjian",
@@ -88,6 +102,23 @@ class DirectorRuntimeContractTests(unittest.TestCase):
             }],
             "state_changes": [],
             "next_beat": "locked_beat",
+            "user_outcome": {
+                "applies": False,
+                "result": "not_applicable",
+                "outcome_summary": "",
+                "revealed_fact_ids": [],
+                "presentation": {
+                    "required": False,
+                    "purpose": "none",
+                    "timing": "after_dialogue",
+                },
+            },
+            "continuation": {
+                "kind": "continue_current",
+                "reason": "blocked",
+                "target_id": None,
+                "world_event": None,
+            },
         }
         report = director.validate_canonical_resolution(
             resolution, proposals, self.beat_info

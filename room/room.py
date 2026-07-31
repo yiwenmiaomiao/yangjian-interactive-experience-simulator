@@ -20,7 +20,7 @@ import json
 import traceback
 import threading
 from functools import wraps
-from typing import Any
+from typing import Any, Mapping
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runtime_context, state_manager, story_engine
@@ -593,169 +593,210 @@ def _tick_two_stage(state, user_message=None, source="cron"):
         )
     public_history_tuple = tuple(public_history)
 
+    resolve_gate = directive.get("resolve_gate") or {}
+    resolve_required = resolve_gate.get("required", True) is not False
+    act_required = resolve_gate.get("act_required", True) is not False
+
     # Phase 2: Actor Pool 行动。Narrator 不在此对象池中。
     actor_results: list[dict[str, Any]] = []
-    task_by_id: dict[str, dict[str, Any]] = {}
-    for raw_task in directive.get("actor_tasks", []):
-        if not isinstance(raw_task, dict):
-            continue
-        target = str(raw_task.get("target_agent_id", ""))
-        visible_facts = tuple(
-            contracts.FactRef(
-                fact_id=str(
-                    info.get("fact_id", info)
-                    if isinstance(info, dict)
-                    else info
-                ),
-                text=str(
-                    info.get("text", info)
-                    if isinstance(info, dict)
-                    else info
-                ),
-                visibility=str(
-                    info.get("visibility", "public")
-                    if isinstance(info, dict)
-                    else "public"
-                ),
-            )
-            for info in raw_task.get(
-                "visible_facts", raw_task.get("information_ids", [])
-            )
-        )
-        try:
-            task = contracts.AgentTask(
-                task_id=str(raw_task.get("task_id", "")),
-                target_agent_id=target,
-                objective=str(raw_task.get("objective", "")),
-                source_reference=str(
-                    raw_task.get("source_reference")
-                    or bi.get("current_beat_id", "")
-                ),
-                visible_facts=visible_facts,
-                allowed_actions=tuple(
-                    raw_task.get("allowed_actions", ("speak", "act"))
-                ),
-                constraints=tuple(raw_task.get("constraints", ())),
-                success_condition=str(
-                    raw_task.get(
-                        "success_condition",
-                        "产生符合角色的行动或明确不行动原因",
-                    )
-                ),
-            )
-        except ValueError:
-            continue
-        task_by_id[task.task_id] = raw_task
-        if target in {"yangjian", "杨戬"}:
-            perception_text = state_manager.get_perception(
-                "yangjian", state, ""
-            )
-            perception = tuple(
-                (
-                    contracts.FactRef(
-                        fact_id="room_perception",
-                        text=perception_text,
-                        visibility="private",
+    if act_required:
+        for raw_task in directive.get("actor_tasks", []):
+            if not isinstance(raw_task, dict):
+                continue
+            target = str(raw_task.get("target_agent_id", ""))
+            visible_facts = tuple(
+                contracts.FactRef(
+                    fact_id=str(
+                        info.get("fact_id", info)
+                        if isinstance(info, dict)
+                        else info
                     ),
-                    *visible_facts,
+                    text=str(
+                        info.get("text", info)
+                        if isinstance(info, dict)
+                        else info
+                    ),
+                    visibility=str(
+                        info.get("visibility", "public")
+                        if isinstance(info, dict)
+                        else "public"
+                    ),
                 )
-                if perception_text.strip()
-                else visible_facts
+                for info in raw_task.get(
+                    "visible_facts", raw_task.get("information_ids", [])
+                )
             )
-            actor_ref = contracts.AgentRef(
-                agent_id="yangjian", kind=contracts.AgentKind.ACTOR
-            )
-            actor_request = contracts.new_message(
-                turn_id=turn_id,
-                story_id=str(bi.get("story_id", "story_1")),
-                beat_id=str(bi.get("current_beat_id", "")),
-                phase=contracts.Phase.ACT,
-                sender=room_ref,
-                recipient=actor_ref,
-                message_type="yangjian.turn.input",
-                correlation_id=direct_response.message_id,
-                payload=contracts.YangJianTurnInput(
+            try:
+                task = contracts.AgentTask(
+                    task_id=str(raw_task.get("task_id", "")),
+                    target_agent_id=target,
+                    objective=str(raw_task.get("objective", "")),
+                    source_reference=str(
+                        raw_task.get("source_reference")
+                        or bi.get("current_beat_id", "")
+                    ),
+                    visible_facts=visible_facts,
+                    allowed_actions=tuple(
+                        raw_task.get("allowed_actions", ("speak", "act"))
+                    ),
+                    constraints=tuple(raw_task.get("constraints", ())),
+                    success_condition=str(
+                        raw_task.get(
+                            "success_condition",
+                            "产生符合角色的行动或明确不行动原因",
+                        )
+                    ),
+                )
+            except ValueError:
+                continue
+            if target in {"yangjian", "杨戬"}:
+                perception_text = state_manager.get_perception(
+                    "yangjian", state, ""
+                )
+                perception = tuple(
+                    (
+                        contracts.FactRef(
+                            fact_id="room_perception",
+                            text=perception_text,
+                            visibility="private",
+                        ),
+                        *visible_facts,
+                    )
+                    if perception_text.strip()
+                    else visible_facts
+                )
+                actor_ref = contracts.AgentRef(
+                    agent_id="yangjian", kind=contracts.AgentKind.ACTOR
+                )
+                actor_request = contracts.new_message(
+                    turn_id=turn_id,
+                    story_id=str(bi.get("story_id", "story_1")),
+                    beat_id=str(bi.get("current_beat_id", "")),
+                    phase=contracts.Phase.ACT,
+                    sender=room_ref,
+                    recipient=actor_ref,
+                    message_type="yangjian.turn.input",
+                    correlation_id=direct_response.message_id,
+                    payload=contracts.YangJianTurnInput(
+                        task=task,
+                        scene={"id": bi.get("current_beat_id", "")},
+                        public_room_history=public_history_tuple,
+                        perception=perception,
+                    ),
+                )
+                result = contracts.to_dict(
+                    yangjian.handle_message(actor_request).payload
+                )
+            else:
+                turn_input = npc.build_structured_turn_input(
+                    target,
                     task=task,
                     scene={"id": bi.get("current_beat_id", "")},
                     public_room_history=public_history_tuple,
-                    perception=perception,
-                ),
-            )
-            result = contracts.to_dict(
-                yangjian.handle_message(actor_request).payload
-            )
-        else:
-            turn_input = npc.build_structured_turn_input(
-                target,
-                task=task,
-                scene={"id": bi.get("current_beat_id", "")},
-                public_room_history=public_history_tuple,
-                perception=visible_facts,
-            )
-            actor_request = contracts.new_message(
-                turn_id=turn_id,
-                story_id=str(bi.get("story_id", "story_1")),
-                beat_id=str(bi.get("current_beat_id", "")),
-                phase=contracts.Phase.ACT,
-                sender=room_ref,
-                recipient=contracts.AgentRef(
-                    agent_id=target, kind=contracts.AgentKind.ACTOR
-                ),
-                message_type="npc.turn.input",
-                correlation_id=direct_response.message_id,
-                payload=turn_input,
-            )
-            result = contracts.to_dict(
-                npc.handle_agent_message(actor_request).payload
-            )
-        actor_results.append(result)
+                    perception=visible_facts,
+                )
+                actor_request = contracts.new_message(
+                    turn_id=turn_id,
+                    story_id=str(bi.get("story_id", "story_1")),
+                    beat_id=str(bi.get("current_beat_id", "")),
+                    phase=contracts.Phase.ACT,
+                    sender=room_ref,
+                    recipient=contracts.AgentRef(
+                        agent_id=target, kind=contracts.AgentKind.ACTOR
+                    ),
+                    message_type="npc.turn.input",
+                    correlation_id=direct_response.message_id,
+                    payload=turn_input,
+                )
+                result = contracts.to_dict(
+                    npc.handle_agent_message(actor_request).payload
+                )
+            actor_results.append(result)
 
-    # Phase 3: DIRECTOR RESOLVE
-    resolve_request = contracts.new_message(
-        turn_id=turn_id,
-        story_id=str(bi.get("story_id", "story_1")),
-        beat_id=str(bi.get("current_beat_id", "")),
-        phase=contracts.Phase.RESOLVE,
-        sender=room_ref,
-        recipient=director_ref,
-        message_type="director.resolve.input",
-        correlation_id=direct_response.message_id,
-        payload=contracts.DirectorResolveInput(
-            directive_id=str(directive["directive_id"]),
-            story_cursor={
-                "story_id": bi.get("story_id", "story_1"),
-                "beat_id": bi.get("current_beat_id", ""),
-            },
-            world_snapshot=dict(state),
-            actor_results=tuple(
-                contracts.actor_turn_result_from_dict(item)
-                for item in actor_results
-            ),
-            unlocked_transitions=tuple(
-                bi.get("available_transitions", ())
-            ),
-            allowed_state_operations=(
-                "set_world_attribute",
-                "move_item",
-                "reveal_fact",
-                "set_character_state",
-                "advance_beat",
-            ),
-        ),
-    )
-    resolve_response = director.handle_resolve(resolve_request)
-    resolution = contracts.to_dict(resolve_response.payload)
-    # Compatibility keys consumed by the existing deterministic state layer.
-    resolution["state_changes"] = resolution.pop("state_operations", [])
-    resolution["next_beat"] = resolution.pop("next_beat_id", None)
-    for decision in resolution.get("decisions", []):
-        decision["proposal_id"] = decision.pop("result_id")
     forbidden_fragments = list(bi.get("forbidden_reveals", []))
     for task in directive.get("actor_tasks", []):
         forbidden_fragments.extend(task.get("constraints", []))
-    outputs, confirmed_events = _apply_actor_resolution(
-        actor_results, resolution, forbidden_fragments
-    )
+
+    resolve_response = None
+    if resolve_required:
+        resolve_request = contracts.new_message(
+            turn_id=turn_id,
+            story_id=str(bi.get("story_id", "story_1")),
+            beat_id=str(bi.get("current_beat_id", "")),
+            phase=contracts.Phase.RESOLVE,
+            sender=room_ref,
+            recipient=director_ref,
+            message_type="director.resolve.input",
+            correlation_id=direct_response.message_id,
+            payload=contracts.DirectorResolveInput(
+                directive_id=str(directive["directive_id"]),
+                story_cursor={
+                    "story_id": bi.get("story_id", "story_1"),
+                    "beat_id": bi.get("current_beat_id", ""),
+                    "allowed_information": list(
+                        bi.get("allowed_information", [])
+                    ),
+                },
+                world_snapshot=dict(state),
+                actor_results=tuple(
+                    contracts.actor_turn_result_from_dict(item)
+                    for item in actor_results
+                ),
+                user_event={
+                    "type": "user_message",
+                    "text": user_message or "",
+                },
+                user_turn=dict(directive.get("user_turn", {})),
+                unlocked_transitions=tuple(
+                    bi.get("available_transitions", ())
+                ),
+                allowed_state_operations=(
+                    "set_world_attribute",
+                    "move_item",
+                    "reveal_fact",
+                    "set_character_state",
+                    "advance_beat",
+                ),
+            ),
+        )
+        resolve_response = director.handle_resolve(resolve_request)
+        resolution = contracts.to_dict(resolve_response.payload)
+        resolution["state_changes"] = resolution.pop("state_operations", [])
+        resolution["next_beat"] = resolution.pop("next_beat_id", None)
+        for decision in resolution.get("decisions", []):
+            if "result_id" in decision:
+                decision["proposal_id"] = decision.pop("result_id")
+        outputs, confirmed_events = _apply_actor_resolution(
+            actor_results, resolution, forbidden_fragments
+        )
+        confirmed_events.extend(
+            _confirmed_events_from_user_outcome(
+                resolution.get("user_outcome")
+            )
+        )
+    else:
+        inline_effects = directive.get("inline_effects") or {}
+        resolution = {
+            "state_changes": list(inline_effects.get("state_operations", [])),
+            "next_beat": None,
+            "continuation": {
+                "kind": "continue_current",
+                "reason": str(
+                    resolve_gate.get("reason", "fast_path_no_resolve")
+                ),
+            },
+            "decisions": [],
+            "user_outcome": None,
+        }
+        outputs, confirmed_events = _auto_accept_actor_results(
+            actor_results, forbidden_fragments
+        )
+        confirmed_events.extend(
+            _confirmed_events_from_user_feedback(
+                inline_effects.get("user_feedback")
+            )
+        )
+
     result_by_id = {
         item.get("result_id"): item for item in actor_results
     }
@@ -773,21 +814,25 @@ def _tick_two_stage(state, user_message=None, source="cron"):
                 summary=str(decision.get("outcome_summary", "")),
             )
 
-    # 独立 Presentation Agent：只接收已裁决的 ConfirmedEvent。
-    narration_request = directive.get("narration_request")
-    if isinstance(narration_request, dict) and confirmed_events:
+    narration_spec = _select_narration_spec(directive, resolution)
+    if narration_spec:
+        narration_events = list(confirmed_events)
+        if not narration_events:
+            narration_events = _synthetic_confirmed_events_for_narration(
+                narration_spec
+            )
         request = contracts.NarrationRequest(
-            purpose=str(narration_request.get("purpose", "visible_action")),
-            timing=str(narration_request.get("timing", "after_dialogue")),
+            purpose=str(narration_spec.get("purpose", "visible_action")),
+            timing=str(narration_spec.get("timing", "after_dialogue")),
             visible_fact_ids=tuple(
-                narration_request.get("visible_fact_ids", ())
+                narration_spec.get("visible_fact_ids", ())
             ),
-            max_characters=int(
-                narration_request.get("max_characters", 100)
-            ),
+            max_characters=int(narration_spec.get("max_characters", 100)),
             style_profile=str(
-                narration_request.get("style_profile", "concise")
+                narration_spec.get("style_profile", "concise")
             ),
+            brief=str(narration_spec.get("brief", "")),
+            scene_facts=tuple(narration_spec.get("scene_facts", ())),
         )
         visible_facts = tuple(
             contracts.FactRef(fact_id=fact_id, text=fact_id)
@@ -804,11 +849,15 @@ def _tick_two_stage(state, user_message=None, source="cron"):
                 kind=contracts.AgentKind.NARRATOR,
             ),
             message_type="narrator.input",
-            correlation_id=resolve_response.message_id,
+            correlation_id=(
+                resolve_response.message_id
+                if resolve_response is not None
+                else direct_response.message_id
+            ),
             payload=contracts.NarratorInput(
                 narration_request=request,
                 scene={"id": bi.get("current_beat_id", "")},
-                confirmed_events=tuple(confirmed_events),
+                confirmed_events=tuple(narration_events),
                 visible_facts=visible_facts,
                 previous_published_messages=public_history_tuple,
             ),
@@ -822,7 +871,15 @@ def _tick_two_stage(state, user_message=None, source="cron"):
             and not draft.get("contains_dialogue")
             and not _contains_forbidden(narration, forbidden_fragments)
         ):
-            outputs.append({"role": "旁白", "text": narration, "kind": "narration"})
+            narration_output = {
+                "role": "旁白",
+                "text": narration,
+                "kind": "narration",
+            }
+            if request.timing == "before_dialogue":
+                outputs.insert(0, narration_output)
+            else:
+                outputs.append(narration_output)
 
     order = [output["role"] for output in outputs] + ["用户"]
 
@@ -939,6 +996,153 @@ def _contains_forbidden(text: str, forbidden: list[str]) -> bool:
         if fragment and fragment in normalized:
             return True
     return False
+
+
+def _auto_accept_actor_results(
+    actor_results: list[dict[str, Any]],
+    forbidden: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Fast path: accept actor proposals without a RESOLVE LLM call."""
+    decisions = []
+    for actor_result in actor_results:
+        result_id = str(actor_result.get("result_id", ""))
+        if actor_result.get("kind") == "abstain":
+            decisions.append({
+                "proposal_id": result_id,
+                "result": "accept_abstention",
+                "outcome_summary": "角色本回合暂不行动",
+            })
+            continue
+        proposal = actor_result.get("proposal") or {}
+        decisions.append({
+            "proposal_id": result_id,
+            "result": "accept",
+            "outcome_summary": "角色行动被采纳",
+            "final_dialogue": proposal.get("dialogue"),
+            "final_action": proposal.get("action"),
+        })
+    return _apply_actor_resolution(
+        actor_results,
+        {
+            "decisions": decisions,
+            "continuation": {
+                "kind": "continue_current",
+                "reason": "fast path auto-accept",
+            },
+        },
+        forbidden,
+    )
+
+
+def _confirmed_events_from_user_feedback(
+    user_feedback: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(user_feedback, Mapping):
+        return []
+    summary = str(user_feedback.get("outcome_summary", "")).strip()
+    if not summary:
+        return []
+    return [{
+        "event_id": "confirmed_user_feedback",
+        "event_type": "user_action",
+        "summary": summary,
+        "participants": ["user"],
+        "fact_ids": list(user_feedback.get("revealed_fact_ids", [])),
+    }]
+
+
+def _confirmed_events_from_user_outcome(
+    user_outcome: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(user_outcome, Mapping):
+        return []
+    if user_outcome.get("applies") is not True:
+        return []
+    summary = str(user_outcome.get("outcome_summary", "")).strip()
+    if not summary:
+        return []
+    return [{
+        "event_id": "confirmed_user_outcome",
+        "event_type": "user_action",
+        "summary": summary,
+        "participants": ["user"],
+        "fact_ids": list(user_outcome.get("revealed_fact_ids", [])),
+    }]
+
+
+def _synthetic_confirmed_events_for_narration(
+    narration_spec: dict[str, Any],
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    brief = str(narration_spec.get("brief", "")).strip()
+    if brief:
+        events.append({
+            "event_id": "confirmed_director_narration_brief",
+            "event_type": "scene_anchor",
+            "summary": brief,
+            "participants": [],
+            "fact_ids": [],
+        })
+    for index, fact in enumerate(narration_spec.get("scene_facts", ())):
+        text = str(fact).strip()
+        if not text:
+            continue
+        events.append({
+            "event_id": f"confirmed_director_scene_fact_{index + 1}",
+            "event_type": "scene_fact",
+            "summary": text,
+            "participants": [],
+            "fact_ids": [],
+        })
+    return events
+
+
+def _select_narration_spec(
+    directive: dict[str, Any],
+    resolution: dict[str, Any],
+) -> dict[str, Any] | None:
+    inline_feedback = (directive.get("inline_effects") or {}).get("user_feedback")
+    if isinstance(inline_feedback, Mapping):
+        presentation = inline_feedback.get("presentation")
+        if isinstance(presentation, Mapping) and presentation.get("required"):
+            return {
+                "purpose": presentation.get("purpose", "visible_action"),
+                "timing": presentation.get("timing", "after_dialogue"),
+                "visible_fact_ids": list(
+                    inline_feedback.get("revealed_fact_ids", [])
+                ),
+                "max_characters": 100,
+                "style_profile": "concise",
+            }
+
+    user_outcome = resolution.get("user_outcome")
+    if isinstance(user_outcome, Mapping):
+        presentation = user_outcome.get("presentation")
+        if isinstance(presentation, Mapping) and presentation.get("required"):
+            return {
+                "purpose": presentation.get("purpose", "visible_action"),
+                "timing": presentation.get("timing", "after_dialogue"),
+                "visible_fact_ids": list(
+                    user_outcome.get("revealed_fact_ids", [])
+                ),
+                "max_characters": 100,
+                "style_profile": "concise",
+            }
+
+    narration_request = directive.get("narration_request")
+    if isinstance(narration_request, Mapping):
+        return {
+            "purpose": narration_request.get("purpose", "visible_action"),
+            "timing": narration_request.get("timing", "after_dialogue"),
+            "visible_fact_ids": list(
+                narration_request.get("visible_fact_ids", [])
+            ),
+            "max_characters": narration_request.get("max_characters", 100),
+            "style_profile": narration_request.get("style_profile", "concise"),
+            "brief": narration_request.get("brief", ""),
+            "scene_facts": list(narration_request.get("scene_facts", [])),
+        }
+    return None
 
 
 def _apply_actor_resolution(

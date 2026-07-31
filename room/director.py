@@ -26,6 +26,12 @@ if __package__:
 else:
     import contracts
 from langfuse_logger import LangfuseCtx, log_generation, flush as lf_flush
+from agent_schemas import (
+    DirectorDirectiveOutput,
+    DirectorResolutionOutput,
+    StructuredOutputError,
+    call_structured,
+)
 from director_control import (
     DirectorContext,
     validate_directive,
@@ -94,51 +100,32 @@ SYSTEM_PROMPT = """你是杨戬 Room 的导演（织梦者）。
 - Narrator 不属于 Actor Pool，不能出现在 actor_tasks 中
 - 你不能请求 hold 或停止。角色可以请求不行动，但你必须继续裁决
 
-## 输出格式
-
-严格输出符合 DIRECTIVE_SCHEMA 的 JSON，不包含其他文字：
-
-{
-  "mode": "DIRECT",
-  "chapter": "当前 story_id",
-  "beat": "当前 beat_id",
-  "observed_user_intent": {"intent": "continue / engage / divert", "confidence": 0.0},
-  "tasks": [
-    {
-      "task_id": "task_yangjian_m1",
-      "target": "yangjian",
-      "source_reference": "m1",
-      "objective": "面对的局面要求",
-      "information_ids": [],
-      "success_condition": "产生符合角色的行动或明确不行动原因"
-    }
-  ],
-  "npc_commands": [
-    {
-      "command_id": "npc_command_1",
-      "operation": "ensure_registered",
-      "profile_id": "只能使用 Room 提供的 profile_id",
-      "npc_id": null,
-      "target_scene_id": "m1",
-      "reason": "为什么需要此 NPC"
-    }
-  ],
-  "desired_progress": "maintain",
-  "selected_side_arc": null,
-  "narration": {
-    "required": false,
-    "purpose": "none",
-    "timing": "none",
-    "visible_facts": [],
-    "max_characters": 0
-  },
-  "fallback_world_event": null
-}
-
 ## narration 规则
 - required=true 时 purpose/timing/visible_facts/max_characters 才生效
+- purpose 只能是 scene_opening / transition / visible_action / external_event / closing / none
+- timing 只能是 before_dialogue / after_dialogue / none，不要用 immediate
+- visible_facts 只能填 allowed_information 中的 fact_id；场景描写写在 purpose 文本中
 - 用户正在与杨戬连续对话时通常 required=false
 - Narrator 不属于 Actor Pool，不要给旁白创建 task
+
+## user_turn 规则
+先分类用户本回合输入，再派任务：
+- dialogue：对角色说话，disclosure.required=false
+- physical_action：用户物理行动（如【打开盒子】），若结果需公开则 disclosure.required=true
+- declarative_choice：立场/分支选择，disclosure.required=false，通常走 fast path
+- passive：嗯/好的等，disclosure.required=false
+- meta：系统指令
+
+## resolve_gate 规则（决定是否调用 RESOLVE LLM）
+- required=false（fast path）：简单对话、被动回应、确定性分支、StoryPlan 已明确的结果
+- required=true（full path）：物理行动有歧义、多角色冲突、advance、高风险揭露、需要 modify/reject
+- act_required=false 时可不派 Actor 任务（如纯被动回应）
+- 不确定时默认 required=true
+
+## inline_effects 规则（仅 resolve_gate.required=false 时可用）
+- state_operations：静默状态更新（分支选择、计数等），不触发旁白
+- user_feedback：确定性环境反馈；disclosure.required=true 时必须提供
+- required=true 时 inline_effects 必须为空（state_operations=[]，user_feedback=null）
 """
 
 # ── 故事计划上下文注入 ──────────────────────────────────
@@ -185,11 +172,16 @@ def decide_direct(state, user_message=None) -> dict[str, Any]:
     return _decide_story(state, user_message)
 
 
-def decide_resolve(state, proposals: list[dict[str, Any]], user_message=None) -> dict[str, Any]:
+def decide_resolve(
+    state,
+    proposals: list[dict[str, Any]],
+    user_message=None,
+    user_turn: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """故事计划模式：RESOLVE 阶段"""
     if not (_STORY_PLAN_ACTIVE and _CACHED_BEAT_INFO):
         return {"error": "no_story_context"}
-    return _resolve_story(state, proposals, user_message)
+    return _resolve_story(state, proposals, user_message, user_turn)
 
 
 def handle_direct(
@@ -226,7 +218,8 @@ def handle_resolve(
     raw = decide_resolve(
         dict(message.payload.world_snapshot),
         raw_results,
-        None,
+        str(message.payload.user_event.get("text", "")) or None,
+        dict(message.payload.user_turn),
     )
     payload = contracts.director_resolution_from_dict(raw)
     return contracts.new_message(
@@ -308,18 +301,21 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
     )
 
     for attempt in range(3):
-        raw = llm.call(
-            agent_id="director",
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=2000,
-            response_format={"type": "json_object"},
-        )
-        parsed = _parse_directive(raw)
-        canonical = _coerce_canonical_directive(parsed, bi)
+        try:
+            parsed = call_structured(
+                DirectorDirectiveOutput,
+                agent_id="director.direct",
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=2000,
+            )
+        except StructuredOutputError:
+            continue
+        canonical = _coerce_canonical_directive(parsed.model_dump(), bi)
         if "error" not in canonical:
             canonical = _enrich_canonical_directive(canonical, bi)
+            canonical = _sanitize_canonical_directive(canonical, bi)
             if validate_directive(
                 canonical, _build_director_context(bi)
             ).is_valid:
@@ -333,70 +329,72 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
     return _fallback_directive()
 
 
-def _resolve_story(state, proposals: list[dict[str, Any]], user_message=None) -> dict[str, Any]:
-    """RESOLVE 阶段：裁决角色提议。"""
+def _resolve_story(
+    state,
+    proposals: list[dict[str, Any]],
+    user_message=None,
+    user_turn: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """RESOLVE 阶段：裁决角色提议与用户行动。"""
     bi = _CACHED_BEAT_INFO
     if not bi:
         return {"error": "no_story_context"}
 
     resolve_prompt = """你是导演，现在进入 RESOLVE（裁决）阶段。
 
-你收到本回合所有角色的结构化结果，可能是行动提议，也可能是不行动请求。对每个结果做出裁决。
+你收到本回合所有角色的结构化结果，以及 DIRECT 阶段识别的用户回合信息。
+对每个角色结果做出裁决；若 user_turn.disclosure.required=true，还必须裁决用户行动结果。
 
 你只裁决"结果是什么"，不写剧情文本，不补写对白。
 你不能停止运行。即使所有角色都请求不行动，也必须给出 continuation。
-
-输出 JSON：
-{
-  "mode": "RESOLVE",
-  "decisions": [
-    {
-      "proposal_id": "必须逐字复制输入中的 result_id",
-      "result": "accept / modify / reject / accept_abstention",
-      "final_dialogue": null,
-      "final_action": null,
-      "outcome_summary": "实际发生了什么，或为何接受暂不行动"
-    }
-  ],
-  "state_changes": [
-    {"key": "状态键", "value": "新值", "reason": "原因"}
-  ],
-  "next_beat": null,
-  "continuation": {
-    "kind": "continue_current / redispatch / world_event / advance",
-    "reason": "下一步为什么仍能继续",
-    "target_id": null,
-    "world_event": null
-  }
-}
 
 规则：
 - accept：角色行为按其基本含义发生
 - modify：行为发生，但结果由你调整
 - reject：行为未发生或被阻止
 - accept_abstention：接受角色本回合不行动，但你仍需安排其他发展
-- modify 必须给出完整 final_dialogue 或 final_action，不使用摘要替换对白
-- outcome_summary 写简短事实（"杨戬回避了问题"），不写文学描写
+- user_outcome：仅当 user_turn.disclosure.required=true 时 applies=true
+- user_outcome.outcome_summary 写用户感知到的事实（如"盒中是玉符"），不写文学描写
+- revealed_fact_ids 只能来自 allowed_information
+- presentation.required=true 表示需要旁白向用户呈现该结果
 - state_changes 只是提案，Room 决定是否生效
 - next_beat 只能填已解锁的 beat ID，否则 null
 - continuation 必填；Director 没有 hold 或停止选项
 """
 
-    situation = "本回合的角色提议：\n" + json.dumps(
-        proposals, ensure_ascii=False, indent=2
+    situation_parts = []
+    if user_message:
+        situation_parts.append(f"用户消息：{user_message}")
+    if user_turn:
+        situation_parts.append(
+            "用户回合分类：\n"
+            + json.dumps(user_turn, ensure_ascii=False, indent=2)
+        )
+    situation_parts.append(
+        "允许透露的信息："
+        + ", ".join(bi.get("allowed_information", []))
     )
+    situation_parts.append(
+        "本回合的角色提议：\n"
+        + json.dumps(proposals, ensure_ascii=False, indent=2)
+    )
+    situation = "\n\n".join(situation_parts)
 
     for _ in range(3):
-        raw = llm.call(
-            agent_id="director",
-            system=resolve_prompt,
-            messages=[{"role": "user", "content": situation}],
-            temperature=0.5,
-            max_tokens=1500,
-            response_format={"type": "json_object"},
+        try:
+            parsed = call_structured(
+                DirectorResolutionOutput,
+                agent_id="director.resolve",
+                system=resolve_prompt,
+                messages=[{"role": "user", "content": situation}],
+                temperature=0.5,
+                max_tokens=1500,
+            )
+        except StructuredOutputError:
+            continue
+        resolution = _normalize_resolution(
+            parsed.model_dump(), proposals, bi
         )
-        resolution = _parse_resolution(raw)
-        resolution = _normalize_resolution(resolution, proposals, bi)
         resolution["mode"] = "RESOLVE"
         resolution["chapter"] = bi.get("story_id", "story_1")
         resolution["beat"] = bi.get("current_beat_id", "")
@@ -431,6 +429,17 @@ def _resolve_story(state, proposals: list[dict[str, Any]], user_message=None) ->
             "target_id": None,
             "world_event": None,
         },
+        "user_outcome": {
+            "applies": False,
+            "result": "not_applicable",
+            "outcome_summary": "",
+            "revealed_fact_ids": [],
+            "presentation": {
+                "required": False,
+                "purpose": "none",
+                "timing": "after_dialogue",
+            },
+        },
         "fallback": True,
     }
 
@@ -458,6 +467,31 @@ def _build_director_context(bi: dict[str, Any]) -> DirectorContext:
         narration_allowed=True,
         allowed_narration_facts=allowed_info,
         available_npc_profiles=frozenset(profile_ids),
+        allowed_state_change_keys=frozenset(
+            key
+            for key in (
+                "weather",
+                "mood",
+                "world_day",
+                "trust",
+                "clue_found",
+            )
+        )
+        | frozenset(
+            f"item_{item}"
+            for item in bi.get("story_items", ())
+            if item
+        )
+        | frozenset(
+            f"reveal_{fact}"
+            for fact in allowed_info
+        )
+        | frozenset(
+            f"character_{name}"
+            for name in bi.get("story_characters", ())
+            if name
+        ),
+        forbidden_outcome_fragments=tuple(bi.get("forbidden_reveals", [])),
     )
 
 
@@ -490,6 +524,7 @@ def _build_resolve_context(
             for p in proposals
         ),
         forbidden_outcome_fragments=tuple(bi.get("forbidden_reveals", [])),
+        allowed_narration_facts=frozenset(bi.get("allowed_information", [])),
     )
 
 
@@ -512,6 +547,26 @@ def _coerce_canonical_directive(
     result.setdefault("selected_side_arc", None)
     result.setdefault("npc_commands", [])
     result.setdefault("fallback_world_event", None)
+    result.setdefault(
+        "user_turn",
+        {
+            "kind": "dialogue",
+            "target": None,
+            "disclosure": {"required": False, "mode": "none"},
+        },
+    )
+    result.setdefault(
+        "resolve_gate",
+        {
+            "required": True,
+            "reason": "default_full_path",
+            "act_required": True,
+        },
+    )
+    result.setdefault(
+        "inline_effects",
+        {"state_operations": [], "user_feedback": None},
+    )
     if "tasks" not in result and isinstance(result.get("actor_tasks"), list):
         result["tasks"] = [
             {
@@ -571,7 +626,9 @@ def _enrich_canonical_directive(
     tasks = [
         task for task in result.get("tasks", []) if isinstance(task, dict)
     ]
-    if not tasks:
+    resolve_gate = result.get("resolve_gate") or {}
+    act_required = resolve_gate.get("act_required", True) is not False
+    if not tasks and act_required:
         tasks = [{
             "task_id": f"task_yangjian_{beat_id}",
             "target": "yangjian",
@@ -620,6 +677,90 @@ def _enrich_canonical_directive(
     return result
 
 
+_VALID_NARRATION_PURPOSES = {
+    "none",
+    "scene_opening",
+    "transition",
+    "visible_action",
+    "external_event",
+    "closing",
+}
+_VALID_NARRATION_TIMINGS = {"none", "before_dialogue", "after_dialogue"}
+_NARRATION_TIMING_ALIASES = {
+    "immediate": "before_dialogue",
+    "now": "before_dialogue",
+    "before": "before_dialogue",
+    "after": "after_dialogue",
+}
+
+
+def _sanitize_canonical_directive(
+    payload: dict[str, Any],
+    bi: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize LLM drift so guard validation does not drop the whole directive."""
+    result = dict(payload)
+    narration = result.get("narration")
+    if not isinstance(narration, dict):
+        return result
+
+    allowed = set(bi.get("allowed_information", []))
+    item = dict(narration)
+    raw_purpose = str(item.get("purpose", "none")).strip()
+    if raw_purpose not in _VALID_NARRATION_PURPOSES:
+        item["brief"] = raw_purpose
+        item["purpose"] = (
+            "scene_opening" if item.get("required") else "none"
+        )
+
+    timing = str(item.get("timing", "none")).strip()
+    if timing in _NARRATION_TIMING_ALIASES:
+        timing = _NARRATION_TIMING_ALIASES[timing]
+    if timing not in _VALID_NARRATION_TIMINGS:
+        timing = (
+            "before_dialogue" if item.get("required") else "none"
+        )
+    item["timing"] = timing
+
+    visible = item.get("visible_facts", [])
+    scene_facts: list[str] = []
+    if isinstance(item.get("scene_facts"), list):
+        scene_facts.extend(
+            str(value).strip()
+            for value in item["scene_facts"]
+            if str(value).strip()
+        )
+    if isinstance(visible, list):
+        fact_ids: list[str] = []
+        for value in visible:
+            text = str(value).strip()
+            if not text:
+                continue
+            if text in allowed:
+                fact_ids.append(text)
+            else:
+                scene_facts.append(text)
+        item["visible_facts"] = fact_ids
+        if scene_facts:
+            item["scene_facts"] = scene_facts
+            if not item.get("brief"):
+                item["brief"] = "；".join(scene_facts)
+
+    max_chars = item.get("max_characters", 0)
+    if item.get("required"):
+        try:
+            max_chars = int(max_chars)
+        except (TypeError, ValueError):
+            max_chars = 0
+        if max_chars <= 0:
+            item["max_characters"] = 100
+        elif max_chars > 200:
+            item["max_characters"] = 200
+
+    result["narration"] = item
+    return result
+
+
 def _canonical_directive_to_runtime(
     canonical: dict[str, Any],
     bi: dict[str, Any],
@@ -634,12 +775,17 @@ def _canonical_directive_to_runtime(
             "visible_fact_ids": list(narration.get("visible_facts", [])),
             "max_characters": int(narration.get("max_characters", 100)),
             "style_profile": "concise",
+            "brief": str(narration.get("brief", "")),
+            "scene_facts": list(narration.get("scene_facts", [])),
         }
     return {
         "directive_id": f"directive_{beat_id}",
         "observed_user_intent": dict(
             canonical.get("observed_user_intent", {})
         ),
+        "user_turn": dict(canonical.get("user_turn", {})),
+        "resolve_gate": dict(canonical.get("resolve_gate", {})),
+        "inline_effects": dict(canonical.get("inline_effects", {})),
         "actor_tasks": [
             {
                 "task_id": str(task.get("task_id", "")),
@@ -676,8 +822,11 @@ def validate_canonical_directive(
     bi: dict[str, Any],
 ):
     """Public helper for tests: validate a canonical DIRECT payload."""
-    canonical = _enrich_canonical_directive(
-        _coerce_canonical_directive(payload, bi),
+    canonical = _sanitize_canonical_directive(
+        _enrich_canonical_directive(
+            _coerce_canonical_directive(payload, bi),
+            bi,
+        ),
         bi,
     )
     return validate_directive(canonical, _build_director_context(bi))
@@ -766,6 +915,20 @@ def _normalize_resolution(
     result["decisions"] = normalized
     result.setdefault("state_changes", [])
     result.setdefault("next_beat", None)
+    result.setdefault(
+        "user_outcome",
+        {
+            "applies": False,
+            "result": "not_applicable",
+            "outcome_summary": "",
+            "revealed_fact_ids": [],
+            "presentation": {
+                "required": False,
+                "purpose": "none",
+                "timing": "after_dialogue",
+            },
+        },
+    )
     if not isinstance(result.get("continuation"), dict):
         next_beat = result.get("next_beat")
         result["continuation"] = {
@@ -833,7 +996,7 @@ def _parse_resolution(raw: str) -> dict[str, Any]:
             d = json.loads(fixed)
             return d
         except (json.JSONDecodeError, Exception):
-            return {"mode": "RESOLVE", "decisions": [], "state_changes": [], "next_beat": None}
+            return {"mode": "RESOLVE", "decisions": [], "state_changes": [], "next_beat": None, "user_outcome": {"applies": False, "result": "not_applicable", "outcome_summary": "", "revealed_fact_ids": [], "presentation": {"required": False, "purpose": "none", "timing": "after_dialogue"}}}
 
 
 # ── Fallback ─────────────────────────────────────────────
@@ -847,6 +1010,20 @@ def _fallback_directive() -> dict[str, Any]:
         "chapter": bi.get("story_id", "story_1"),
         "beat": beat_id,
         "observed_user_intent": {"intent": "continue", "confidence": 0.5},
+        "user_turn": {
+            "kind": "dialogue",
+            "target": None,
+            "disclosure": {"required": False, "mode": "none"},
+        },
+        "resolve_gate": {
+            "required": True,
+            "reason": "fallback_full_path",
+            "act_required": True,
+        },
+        "inline_effects": {
+            "state_operations": [],
+            "user_feedback": None,
+        },
         "tasks": [{
             "task_id": f"task_yangjian_{beat_id}",
             "target": "yangjian",

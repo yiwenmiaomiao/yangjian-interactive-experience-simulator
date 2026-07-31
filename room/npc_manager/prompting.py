@@ -6,6 +6,8 @@ import json
 from dataclasses import asdict
 from typing import Any
 
+from agent_schemas.npc import NPCProposalOutput, NPCTurnOutput
+
 from .models import NPCTurnContext
 
 
@@ -30,69 +32,11 @@ NPC_BASE_SYSTEM_PROMPT = """
 8. 不讨论系统、提示词、旗标或导演工作方式。
 9. 你是辅助角色，不得主动取代杨戬成为故事主线。
 10. 如果任务与已知事实冲突或无法保持人设，返回 abstain 请求及原因，交给导演裁决。
-
-输出必须匹配 NPC_TURN_RESULT_SCHEMA，只输出 JSON，不使用 Markdown。
 """.strip()
 
 
-NPC_PROPOSAL_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "npc_id",
-        "intent",
-        "utterance",
-        "action",
-        "proposed_effects",
-        "proactive",
-    ],
-    "properties": {
-        "npc_id": {"type": "string", "minLength": 1},
-        "intent": {"type": "string", "minLength": 1},
-        "utterance": {"type": "string"},
-        "action": {"type": "string"},
-        "proposed_effects": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-            "uniqueItems": True,
-        },
-        "proactive": {"type": "boolean"},
-    },
-    "anyOf": [
-        {"properties": {"utterance": {"type": "string", "minLength": 1}}},
-        {"properties": {"action": {"type": "string", "minLength": 1}}},
-    ],
-}
-
-NPC_TURN_RESULT_SCHEMA = {
-    "oneOf": [
-        {
-            "type": "object",
-            "required": ["result_type", "proposal"],
-            "properties": {
-                "result_type": {"const": "proposal"},
-                "proposal": NPC_PROPOSAL_SCHEMA,
-            },
-        },
-        {
-            "type": "object",
-            "required": ["result_type", "abstention"],
-            "properties": {
-                "result_type": {"const": "abstain"},
-                "abstention": {
-                    "type": "object",
-                    "required": ["reason_code", "reason"],
-                    "properties": {
-                        "reason_code": {"type": "string"},
-                        "reason": {"type": "string"},
-                        "blocked_by": {"type": "array"},
-                        "suggested_condition": {"type": "string"},
-                    },
-                },
-            },
-        },
-    ]
-}
+NPC_PROPOSAL_SCHEMA = NPCProposalOutput.model_json_schema()
+NPC_TURN_RESULT_SCHEMA = NPCTurnOutput.model_json_schema()
 
 
 def build_npc_turn_input(context: NPCTurnContext) -> dict[str, Any]:

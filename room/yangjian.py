@@ -5,13 +5,18 @@
 - 输出他的行动或对话
 - 动作和对话必须分开发
 """
+from __future__ import annotations
+
 import os, json
+from typing import Any
 import llm
 if __package__:
     from . import contracts
 else:
     import contracts
 from langfuse_logger import LangfuseCtx, log_generation, flush as lf_flush
+from agent_schemas import ActorTurnOutput, StructuredOutputError, call_structured
+from agent_schemas.actor import ActorAbstentionOutput
 
 PROJECT_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
     "YANGJIAN_PROJECT_DIR",
@@ -37,18 +42,49 @@ def _load_memory():
 
 SYSTEM_PROMPT_HEAD = """你是杨戬，二郎显圣真君。"""
 
-STRUCTURED_SYSTEM_PROMPT = """你是杨戬。你会收到一个结构化回合输入。
-你可以看到 public_room_history 中 Room 已公开的全部消息，包括用户、NPC、旁白和你自己的消息。
+STRUCTURED_SYSTEM_PROMPT = """你是杨戬。你会收到本回合任务和 Room 已公开的消息记录。
 perception 是你额外可感知但不一定公开的事实。
 
-只输出 JSON，不使用 Markdown。二选一：
-1. 正常行动：
-{"result_type":"proposal","proposal":{"intent":"意图","dialogue":{"text":"对白","intent":"表达意图","addressee_ids":[]}或null,"action":{"description":"动作","action_type":"act","target_ids":[],"expected_effects":[]}或null,"proposed_effects":[],"confidence":0.5,"referenced_fact_ids":[]}}
-2. 确实无法合理行动：
-{"result_type":"abstain","abstention":{"reason_code":"原因代码","reason":"具体原因","blocked_by":[],"suggested_condition":"什么条件下可以行动"}}
-
+你可以提出对白或动作，也可以请求本回合不行动。
 不行动只是请求，Director 会裁决。不要输出“沉默”“站着不动”来伪装行动。
 不要宣布动作成功，不要修改 Room 状态，不要替其他角色说话。"""
+
+
+def _format_public_message(message: Any) -> str:
+    if isinstance(message, contracts.PublishedMessage):
+        role = message.role
+        text = message.text
+    elif isinstance(message, dict):
+        role = str(message.get("role", ""))
+        text = str(message.get("text", ""))
+    else:
+        return ""
+    text = text.strip()
+    if not text:
+        return ""
+    return f"{role}：{text}"
+
+
+def _build_turn_prompt(turn_input: contracts.YangJianTurnInput) -> str:
+    lines = [
+        f"场景：{turn_input.scene.get('id', '')}",
+        f"本回合任务：{turn_input.task.objective}",
+    ]
+    if turn_input.task.success_condition.strip():
+        lines.append(f"成功条件：{turn_input.task.success_condition}")
+    if turn_input.perception:
+        lines.append("额外感知：")
+        for fact in turn_input.perception:
+            if fact.text.strip():
+                lines.append(f"- {fact.text}")
+    lines.append("公开消息：")
+    history_lines = [
+        line
+        for message in turn_input.public_room_history
+        if (line := _format_public_message(message))
+    ]
+    lines.extend(history_lines or ["（暂无）"])
+    return "\n".join(lines)
 
 
 INPUT_TEMPLATE = """{soul}
@@ -75,43 +111,43 @@ INPUT_TEMPLATE = """{soul}
 
 def act_turn(turn_input: contracts.YangJianTurnInput) -> dict:
     """Structured Yang Jian runtime entry point."""
-    payload = {
-        "task": contracts.to_dict(turn_input.task),
-        "scene": dict(turn_input.scene),
-        "public_room_history": contracts.to_dict(
-            turn_input.public_room_history
-        ),
-        "perception": contracts.to_dict(turn_input.perception),
-        "recent_memory": list(turn_input.recent_memory),
-        "relationship_state": dict(turn_input.relationship_state),
-        "current_stance": turn_input.current_stance,
-        "character_id": turn_input.character_id,
-        "soul_version": turn_input.soul_version,
-    }
-    raw = llm.call(
-        agent_id="yangjian",
-        system=f"{STRUCTURED_SYSTEM_PROMPT}\n\n## SOUL\n{_load_soul()}",
-        messages=[{
-            "role": "user",
-            "content": json.dumps(payload, ensure_ascii=False),
-        }],
-        temperature=0.6,
-        max_tokens=1500,
-    )
-    data = _parse_json_object(raw)
-    if data.get("result_type") == "abstain":
-        item = data.get("abstention", {})
-        abstention = contracts.AbstainRequest(
-            request_id=str(
-                item.get("request_id")
-                or f"abstain_yangjian_{turn_input.task.task_id}"
+    try:
+        data = call_structured(
+            ActorTurnOutput,
+            agent_id="yangjian",
+            system=f"{STRUCTURED_SYSTEM_PROMPT}\n\n## SOUL\n{_load_soul()}",
+            messages=[{
+                "role": "user",
+                "content": _build_turn_prompt(turn_input),
+            }],
+            temperature=0.6,
+            max_tokens=1500,
+        )
+    except StructuredOutputError:
+        data = ActorTurnOutput(
+            result_type="abstain",
+            abstention=ActorAbstentionOutput(
+                reason_code="INVALID_OUTPUT",
+                reason="杨戬没有提出可裁决的对白或动作",
+                suggested_condition=(
+                    "Director should provide a concrete situation"
+                ),
             ),
+        )
+    if data.result_type == "abstain":
+        item = data.abstention
+        abstention = contracts.AbstainRequest(
+            request_id=f"abstain_yangjian_{turn_input.task.task_id}",
             task_id=turn_input.task.task_id,
             agent_id="yangjian",
-            reason_code=str(item.get("reason_code") or "INSUFFICIENT_CONTEXT"),
-            reason=str(item.get("reason") or "无法在不破坏人设的情况下行动"),
-            blocked_by=tuple(item.get("blocked_by", ())),
-            suggested_condition=str(item.get("suggested_condition", "")),
+            reason_code=str(item.reason_code if item else "INSUFFICIENT_CONTEXT"),
+            reason=str(
+                item.reason if item else "无法在不破坏人设的情况下行动"
+            ),
+            blocked_by=tuple(item.blocked_by if item else ()),
+            suggested_condition=str(
+                item.suggested_condition if item else ""
+            ),
         )
         return contracts.to_dict(
             contracts.ActorTurnResult(
@@ -123,29 +159,28 @@ def act_turn(turn_input: contracts.YangJianTurnInput) -> dict:
             )
         )
 
-    proposal_data = (
-        data.get("proposal", {})
-        if data.get("result_type") == "proposal"
-        else {}
-    )
-    if not proposal_data:
-        legacy = _parse_output(raw)
-        proposal_data = {
-            "intent": "respond",
-            "dialogue": (
-                {"text": "\n".join(legacy["dialogues"])}
-                if legacy["dialogues"]
-                else None
-            ),
-            "action": (
-                {"description": "\n".join(legacy["actions"])}
-                if legacy["actions"]
-                else None
-            ),
-        }
-    dialogue_data = proposal_data.get("dialogue")
-    action_data = proposal_data.get("action")
-    if not dialogue_data and not action_data:
+    proposal_data = data.proposal
+    if proposal_data is None:
+        abstention = contracts.AbstainRequest(
+            request_id=f"abstain_yangjian_{turn_input.task.task_id}",
+            task_id=turn_input.task.task_id,
+            agent_id="yangjian",
+            reason_code="EMPTY_RESPONSE",
+            reason="杨戬没有提出可裁决的对白或动作",
+            suggested_condition="Director should provide a concrete situation",
+        )
+        return contracts.to_dict(
+            contracts.ActorTurnResult(
+                result_id=abstention.request_id,
+                task_id=turn_input.task.task_id,
+                agent_id="yangjian",
+                kind=contracts.ActorResultKind.ABSTAIN,
+                abstention=abstention,
+            )
+        )
+    dialogue_data = proposal_data.dialogue
+    action_data = proposal_data.action
+    if dialogue_data is None and action_data is None:
         abstention = contracts.AbstainRequest(
             request_id=f"abstain_yangjian_{turn_input.task.task_id}",
             task_id=turn_input.task.task_id,
@@ -164,39 +199,32 @@ def act_turn(turn_input: contracts.YangJianTurnInput) -> dict:
             )
         )
     proposal = contracts.ActorProposal(
-        proposal_id=str(
-            proposal_data.get("proposal_id")
-            or f"proposal_yangjian_{turn_input.task.task_id}"
-        ),
+        proposal_id=f"proposal_yangjian_{turn_input.task.task_id}",
         task_id=turn_input.task.task_id,
         agent_id="yangjian",
-        intent=str(proposal_data.get("intent") or "respond"),
+        intent=proposal_data.intent,
         dialogue=(
             contracts.DialogueProposal(
-                text=str(dialogue_data.get("text", "")),
-                intent=str(dialogue_data.get("intent", "")),
-                addressee_ids=tuple(dialogue_data.get("addressee_ids", ())),
+                text=dialogue_data.text,
+                intent=dialogue_data.intent,
+                addressee_ids=tuple(dialogue_data.addressee_ids),
             )
-            if isinstance(dialogue_data, dict) and dialogue_data.get("text")
+            if dialogue_data is not None
             else None
         ),
         action=(
             contracts.ActionProposal(
-                description=str(action_data.get("description", "")),
-                action_type=str(action_data.get("action_type", "act")),
-                target_ids=tuple(action_data.get("target_ids", ())),
-                expected_effects=tuple(
-                    action_data.get("expected_effects", ())
-                ),
+                description=action_data.description,
+                action_type=action_data.action_type,
+                target_ids=tuple(action_data.target_ids),
+                expected_effects=tuple(action_data.expected_effects),
             )
-            if isinstance(action_data, dict) and action_data.get("description")
+            if action_data is not None
             else None
         ),
-        proposed_effects=tuple(proposal_data.get("proposed_effects", ())),
-        confidence=float(proposal_data.get("confidence", 0.5)),
-        referenced_fact_ids=tuple(
-            proposal_data.get("referenced_fact_ids", ())
-        ),
+        proposed_effects=tuple(proposal_data.proposed_effects),
+        confidence=proposal_data.confidence,
+        referenced_fact_ids=tuple(proposal_data.referenced_fact_ids),
     )
     return contracts.to_dict(
         contracts.ActorTurnResult(

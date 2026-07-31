@@ -377,7 +377,9 @@ class NPCPromptTests(unittest.TestCase):
 
     def test_fixed_prompt_and_schema_preserve_director_authority(self) -> None:
         self.assertIn("行动结果由导演裁决", NPC_BASE_SYSTEM_PROMPT)
-        self.assertIn("proposed_effects", NPC_PROPOSAL_SCHEMA["required"])
+        from agent_schemas.npc import NPCProposalOutput
+
+        self.assertIn("proposed_effects", NPCProposalOutput.model_fields)
 
 
 class RegistryAndCodecTests(unittest.TestCase):

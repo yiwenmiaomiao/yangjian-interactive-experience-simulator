@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 import unittest
 from unittest.mock import patch
 
+from agent_schemas.actor import ActorProposalOutput, ActorTurnOutput, DialogueOutput
 from room import contracts, room, yangjian
 from tests.contract_fixtures import task
 
@@ -25,27 +25,23 @@ class ActorResultTests(unittest.TestCase):
                 )
             )
         )
-        llm_result = {
-            "result_type": "proposal",
-            "proposal": {
-                "intent": "respond",
-                "dialogue": {
-                    "text": "我都听见了。",
-                    "intent": "acknowledge",
-                    "addressee_ids": ["用户"],
-                },
-                "action": None,
-                "proposed_effects": [],
-                "confidence": 0.8,
-                "referenced_fact_ids": [],
-            },
-        }
+        proposal = ActorTurnOutput(
+            result_type="proposal",
+            proposal=ActorProposalOutput(
+                intent="respond",
+                dialogue=DialogueOutput(
+                    text="我都听见了。",
+                    intent="acknowledge",
+                    addressee_ids=["用户"],
+                ),
+            ),
+        )
         with (
             patch.object(yangjian, "_load_soul", return_value="SOUL"),
             patch.object(
-                yangjian.llm,
-                "call",
-                return_value=json.dumps(llm_result, ensure_ascii=False),
+                yangjian,
+                "call_structured",
+                return_value=proposal,
             ) as call,
         ):
             result = yangjian.act_turn(
@@ -87,6 +83,33 @@ class ActorResultTests(unittest.TestCase):
         )
         self.assertEqual([], outputs)
         self.assertEqual([], events)
+
+
+    def test_yangjian_prompt_uses_readable_history_not_raw_json(self) -> None:
+        history = (
+            contracts.PublishedMessage(
+                message_id="m1",
+                role="用户",
+                kind="dialogue",
+                text="你看里面是什么",
+            ),
+        )
+        prompt = yangjian._build_turn_prompt(
+            contracts.YangJianTurnInput(
+                task=contracts.AgentTask(
+                    task_id="task_yangjian",
+                    target_agent_id="yangjian",
+                    objective="面对古盒做出反应",
+                    source_reference="m1",
+                ),
+                scene={"id": "m1"},
+                public_room_history=history,
+            )
+        )
+        self.assertIn("面对古盒做出反应", prompt)
+        self.assertIn("用户：你看里面是什么", prompt)
+        self.assertNotIn("message_id", prompt)
+        self.assertNotIn("confirmed_event_ids", prompt)
 
 
 if __name__ == "__main__":

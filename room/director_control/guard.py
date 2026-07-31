@@ -185,7 +185,16 @@ def validate_directive(
         )
 
     fallback_world_event = payload.get("fallback_world_event")
-    if not tasks and not npc_commands and not isinstance(fallback_world_event, Mapping):
+    resolve_gate = payload.get("resolve_gate")
+    act_required = True
+    if isinstance(resolve_gate, Mapping):
+        act_required = resolve_gate.get("act_required", True) is not False
+    if (
+        not tasks
+        and not npc_commands
+        and not isinstance(fallback_world_event, Mapping)
+        and act_required
+    ):
         issues.append(
             _issue(
                 "DIRECTOR_IDLE",
@@ -193,6 +202,8 @@ def validate_directive(
                 "tasks",
             )
         )
+
+    _check_resolve_gate(payload, context, issues)
 
     side_arc = payload.get("selected_side_arc")
     if side_arc is not None and side_arc not in context.unlocked_side_arcs:
@@ -367,6 +378,8 @@ def validate_resolution(
                 )
             )
 
+    _check_user_outcome(payload.get("user_outcome"), context, issues)
+
     return GuardReport(issues=tuple(issues))
 
 
@@ -440,6 +453,159 @@ def _check_narration(
 def _contains_forbidden(text: str, fragments: tuple[str, ...]) -> bool:
     normalized = text.casefold()
     return any(fragment.casefold() in normalized for fragment in fragments)
+
+
+def _check_resolve_gate(
+    payload: Mapping[str, Any],
+    context: DirectorContext,
+    issues: list[GuardIssue],
+) -> None:
+    resolve_gate = payload.get("resolve_gate")
+    inline_effects = payload.get("inline_effects")
+    user_turn = payload.get("user_turn")
+    if not isinstance(resolve_gate, Mapping):
+        issues.append(
+            _issue(
+                "RESOLVE_GATE_INVALID",
+                "resolve_gate must be an object",
+                "resolve_gate",
+            )
+        )
+        return
+    if not isinstance(inline_effects, Mapping):
+        issues.append(
+            _issue(
+                "INLINE_EFFECTS_INVALID",
+                "inline_effects must be an object",
+                "inline_effects",
+            )
+        )
+        return
+
+    resolve_required = resolve_gate.get("required") is True
+    state_operations = inline_effects.get("state_operations", [])
+    user_feedback = inline_effects.get("user_feedback")
+    has_inline = bool(state_operations) or isinstance(user_feedback, Mapping)
+
+    if resolve_required and has_inline:
+        issues.append(
+            _issue(
+                "INLINE_EFFECTS_FORBIDDEN",
+                "inline_effects must be empty when resolve_gate.required is true",
+                "inline_effects",
+            )
+        )
+
+    disclosure_required = False
+    if isinstance(user_turn, Mapping):
+        disclosure = user_turn.get("disclosure")
+        if isinstance(disclosure, Mapping):
+            disclosure_required = disclosure.get("required") is True
+
+    if (
+        not resolve_required
+        and disclosure_required
+        and not isinstance(user_feedback, Mapping)
+    ):
+        issues.append(
+            _issue(
+                "USER_FEEDBACK_REQUIRED",
+                "user_feedback is required when disclosure is required on fast path",
+                "inline_effects.user_feedback",
+            )
+        )
+
+    if isinstance(user_feedback, Mapping):
+        revealed = user_feedback.get("revealed_fact_ids", [])
+        if isinstance(revealed, list):
+            unauthorized = set(revealed) - set(context.allowed_narration_facts)
+            if unauthorized:
+                issues.append(
+                    _issue(
+                        "USER_FEEDBACK_FACT_NOT_ALLOWED",
+                        f"unauthorized revealed facts: {sorted(unauthorized)}",
+                        "inline_effects.user_feedback",
+                    )
+                )
+        summary = user_feedback.get("outcome_summary")
+        if isinstance(summary, str) and _contains_forbidden(
+            summary, context.forbidden_outcome_fragments
+        ):
+            issues.append(
+                _issue(
+                    "USER_FEEDBACK_FORBIDDEN",
+                    "user_feedback contains a Room-defined forbidden fragment",
+                    "inline_effects.user_feedback",
+                )
+            )
+
+    if isinstance(state_operations, list):
+        for index, change in enumerate(state_operations):
+            location = f"inline_effects.state_operations[{index}]"
+            if not isinstance(change, Mapping):
+                issues.append(
+                    _issue(
+                        "INLINE_STATE_INVALID",
+                        "inline state operation must be an object",
+                        location,
+                    )
+                )
+                continue
+            key = change.get("key")
+            if key not in context.allowed_state_change_keys:
+                issues.append(
+                    _issue(
+                        "INLINE_STATE_NOT_ALLOWED",
+                        f"state key is not allowed: {key}",
+                        location,
+                    )
+                )
+
+
+def _check_user_outcome(
+    user_outcome: Any,
+    context: DirectorContext,
+    issues: list[GuardIssue],
+) -> None:
+    if not isinstance(user_outcome, Mapping):
+        issues.append(
+            _issue(
+                "USER_OUTCOME_INVALID",
+                "user_outcome must be an object",
+                "user_outcome",
+            )
+        )
+        return
+    if user_outcome.get("applies") is not True:
+        return
+    summary = user_outcome.get("outcome_summary")
+    if not isinstance(summary, str) or not summary.strip():
+        issues.append(
+            _issue(
+                "USER_OUTCOME_SUMMARY_MISSING",
+                "outcome_summary is required when user_outcome applies",
+                "user_outcome",
+            )
+        )
+    elif _contains_forbidden(summary, context.forbidden_outcome_fragments):
+        issues.append(
+            _issue(
+                "USER_OUTCOME_FORBIDDEN",
+                "user_outcome contains a Room-defined forbidden fragment",
+                "user_outcome",
+            )
+        )
+    revealed = user_outcome.get("revealed_fact_ids", [])
+    if isinstance(revealed, list):
+        unauthorized = set(revealed) - set(context.allowed_narration_facts)
+        if unauthorized:
+            issues.append(
+                _issue(
+                    "USER_OUTCOME_FACT_NOT_ALLOWED",
+                    f"unauthorized revealed facts: {sorted(unauthorized)}",
+                    "user_outcome",
+                )
+            )
 
 
 def _issue(code: str, message: str, location: str) -> GuardIssue:

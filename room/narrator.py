@@ -17,6 +17,7 @@ if __package__:
 else:
     import contracts
 from langfuse_logger import LangfuseCtx, log_generation, flush as lf_flush
+from agent_schemas import NarrationOutput, StructuredOutputError, call_structured
 
 SYSTEM_PROMPT = """你是杨戬项目的旁白，只描述用户能够直接观察到的外部事实。
 
@@ -47,7 +48,7 @@ SYSTEM_PROMPT = """你是杨戬项目的旁白，只描述用户能够直接观�
 - 不评价角色，不解释气氛，不告诉用户应该有什么感受。
 
 ## 输出格式
-只输出旁白文本本身。无话可说时输出空字符串。"""
+在 text 字段写旁白正文。无话可说时 text 留空。"""
 
 
 INPUT_TEMPLATE = """## narration_task
@@ -77,6 +78,18 @@ INPUT_TEMPLATE = """## narration_task
 请根据 narration_task 写一段旁白。无话可说时直接返回空字符串。"""
 
 
+def _build_narration_task(request: contracts.NarrationRequest) -> str:
+    parts = [f"类型：{request.purpose}", f"时机：{request.timing}"]
+    if request.brief.strip():
+        parts.append(f"导演说明：{request.brief.strip()}")
+    if request.scene_facts:
+        parts.append(
+            "需呈现的场景事实："
+            + "；".join(str(item) for item in request.scene_facts)
+        )
+    return "；".join(parts)
+
+
 def draft(turn_input: contracts.NarratorInput) -> dict:
     """Generate a structured draft from confirmed events only."""
     request = turn_input.narration_request
@@ -93,7 +106,7 @@ def draft(turn_input: contracts.NarratorInput) -> dict:
             )
         )
     prompt = INPUT_TEMPLATE.format(
-        task=f"{request.purpose}；时机：{request.timing}",
+        task=_build_narration_task(request),
         scene=str(turn_input.scene.get("name") or turn_input.scene.get("id") or ""),
         outcome="\n".join(confirmed),
         event_context="\n".join(
@@ -105,14 +118,18 @@ def draft(turn_input: contracts.NarratorInput) -> dict:
         ) or "无",
         max_chars=str(request.max_characters),
     )
-    raw = llm.call(
-        agent_id="narrator",
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-        max_tokens=300,
-    )
-    text = raw.strip()
+    try:
+        output = call_structured(
+            NarrationOutput,
+            agent_id="narrator",
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=300,
+        )
+        text = output.text.strip()
+    except StructuredOutputError:
+        text = ""
     if text in ("", "“”", "''", "（空）", "(空)"):
         text = ""
     text = text[: request.max_characters]

@@ -12,6 +12,10 @@ from __future__ import annotations
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import llm
+if __package__:
+    from . import contracts
+else:
+    import contracts
 from langfuse_logger import LangfuseCtx, log_generation, flush as lf_flush
 
 SYSTEM_PROMPT = """你是杨戬项目的旁白，只描述用户能够直接观察到的外部事实。
@@ -71,6 +75,92 @@ INPUT_TEMPLATE = """## narration_task
 {max_chars}
 
 请根据 narration_task 写一段旁白。无话可说时直接返回空字符串。"""
+
+
+def draft(turn_input: contracts.NarratorInput) -> dict:
+    """Generate a structured draft from confirmed events only."""
+    request = turn_input.narration_request
+    confirmed = [
+        str(event.get("summary", ""))
+        for event in turn_input.confirmed_events
+        if str(event.get("summary", "")).strip()
+    ]
+    if not confirmed:
+        return contracts.to_dict(
+            contracts.NarrationDraft(
+                narration_id="narration_empty",
+                text="",
+            )
+        )
+    prompt = INPUT_TEMPLATE.format(
+        task=f"{request.purpose}；时机：{request.timing}",
+        scene=str(turn_input.scene.get("name") or turn_input.scene.get("id") or ""),
+        outcome="\n".join(confirmed),
+        event_context="\n".join(
+            f"{message.role}: {message.text}"
+            for message in turn_input.previous_published_messages[-5:]
+        ) or "无此前公开消息",
+        facts_summary="\n".join(
+            f"{fact.fact_id}: {fact.text}" for fact in turn_input.visible_facts
+        ) or "无",
+        max_chars=str(request.max_characters),
+    )
+    raw = llm.call(
+        agent_id="narrator",
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=300,
+    )
+    text = raw.strip()
+    if text in ("", "“”", "''", "（空）", "(空)"):
+        text = ""
+    text = text[: request.max_characters]
+    contains_dialogue = any(
+        marker in text
+        for marker in ("杨戬说", "用户说", "NPC说", "：“", ": “")
+    )
+    return contracts.to_dict(
+        contracts.NarrationDraft(
+            narration_id=f"narration_{len(confirmed)}",
+            text=text,
+            referenced_event_ids=tuple(
+                str(event.get("event_id", ""))
+                for event in turn_input.confirmed_events
+                if event.get("event_id")
+            ),
+            referenced_fact_ids=tuple(
+                fact.fact_id for fact in turn_input.visible_facts
+            ),
+            contains_dialogue=contains_dialogue,
+        )
+    )
+
+
+def handle_message(
+    message: contracts.AgentMessage[contracts.NarratorInput],
+) -> contracts.AgentMessage[contracts.NarrationDraft]:
+    if message.phase is not contracts.Phase.NARRATE:
+        raise ValueError("Narrator received a message outside NARRATE phase")
+    raw = draft(message.payload)
+    payload = contracts.NarrationDraft(
+        narration_id=str(raw["narration_id"]),
+        text=str(raw["text"]),
+        referenced_event_ids=tuple(raw.get("referenced_event_ids", ())),
+        referenced_fact_ids=tuple(raw.get("referenced_fact_ids", ())),
+        contains_dialogue=bool(raw.get("contains_dialogue", False)),
+    )
+    return contracts.new_message(
+        turn_id=message.turn_id,
+        story_id=message.story_id,
+        beat_id=message.beat_id,
+        phase=contracts.Phase.NARRATE,
+        sender=message.recipient,
+        recipient=message.sender,
+        message_type="narrator.draft",
+        correlation_id=message.message_id,
+        payload=payload,
+    )
 
 
 def speak(director_decision, state, max_chars: int = 200):

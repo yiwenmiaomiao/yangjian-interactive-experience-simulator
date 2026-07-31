@@ -24,6 +24,7 @@ def context(**overrides) -> DirectorContext:
         "unlocked_side_arcs": frozenset({"side_1"}),
         "allowed_state_change_keys": frozenset({"trust", "clue_found"}),
         "proposal_ids": frozenset({"proposal_1", "proposal_2"}),
+        "available_npc_profiles": frozenset({"profile_1"}),
     }
     values.update(overrides)
     return DirectorContext(**values)
@@ -57,11 +58,8 @@ def directive():
             "visible_facts": [],
             "max_characters": 0,
         },
-        "hold": {
-            "requested": False,
-            "reason": "",
-            "wait_for": "",
-        },
+        "npc_commands": [],
+        "fallback_world_event": None,
     }
 
 
@@ -90,6 +88,12 @@ def resolution():
             }
         ],
         "next_beat": "beat_2",
+        "continuation": {
+            "kind": "advance",
+            "reason": "已满足推进条件",
+            "target_id": "beat_2",
+            "world_event": None,
+        },
     }
 
 
@@ -117,7 +121,7 @@ class DirectiveGuardTests(unittest.TestCase):
 
         self.assertIn("SIDE_ARC_LOCKED", {issue.code for issue in report.issues})
 
-    def test_rejects_idle_director_without_hold(self) -> None:
+    def test_rejects_idle_directive_without_progress(self) -> None:
         payload = directive()
         payload["tasks"] = []
 
@@ -125,7 +129,41 @@ class DirectiveGuardTests(unittest.TestCase):
 
         self.assertIn("DIRECTOR_IDLE", {issue.code for issue in report.issues})
 
-    def test_rejects_consecutive_hold(self) -> None:
+    def test_accepts_progress_via_npc_commands_only(self) -> None:
+        payload = directive()
+        payload["tasks"] = []
+        payload["npc_commands"] = [{
+            "command_id": "command_1",
+            "operation": "ensure_registered",
+            "profile_id": "profile_1",
+            "npc_id": None,
+            "target_scene_id": "beat_1",
+            "reason": "Bring NPC online",
+        }]
+
+        report = validate_directive(payload, context())
+
+        self.assertTrue(report.is_valid)
+
+    def test_rejects_actor_task_targeting_narrator(self) -> None:
+        payload = directive()
+        payload["tasks"] = [{
+            "task_id": "task_narrator",
+            "target": "narrator",
+            "source_reference": "beat_1",
+            "objective": "Describe the scene",
+            "information_ids": [],
+            "success_condition": "Narration delivered",
+        }]
+
+        report = validate_directive(payload, context())
+
+        self.assertIn(
+            "TARGET_NOT_AVAILABLE",
+            {issue.code for issue in report.issues},
+        )
+
+    def test_rejects_director_hold(self) -> None:
         payload = directive()
         payload["tasks"] = []
         payload["hold"] = {
@@ -139,7 +177,10 @@ class DirectiveGuardTests(unittest.TestCase):
             context(consecutive_holds=1),
         )
 
-        self.assertIn("REPEATED_HOLD", {issue.code for issue in report.issues})
+        self.assertIn(
+            "DIRECTOR_HOLD_FORBIDDEN",
+            {issue.code for issue in report.issues},
+        )
 
     def test_rejects_task_repeated_twice(self) -> None:
         payload = directive()
@@ -154,6 +195,22 @@ class DirectiveGuardTests(unittest.TestCase):
         )
 
         self.assertIn("TASK_REPEATED", {issue.code for issue in report.issues})
+
+    def test_rejects_unknown_story_profile_command(self) -> None:
+        payload = directive()
+        payload["npc_commands"] = [{
+            "command_id": "command_1",
+            "operation": "activate",
+            "profile_id": "profile_unknown",
+            "npc_id": None,
+            "target_scene_id": "beat_1",
+            "reason": "Need an NPC",
+        }]
+        report = validate_directive(payload, context())
+        self.assertIn(
+            "NPC_PROFILE_NOT_AVAILABLE",
+            {issue.code for issue in report.issues},
+        )
 
     def test_narration_requires_room_permission(self) -> None:
         payload = directive()
@@ -204,6 +261,15 @@ class ResolutionGuardTests(unittest.TestCase):
 
         self.assertIn(
             "STATE_CHANGE_NOT_ALLOWED",
+            {issue.code for issue in report.issues},
+        )
+
+    def test_requires_continuation(self) -> None:
+        payload = resolution()
+        del payload["continuation"]
+        report = validate_resolution(payload, context())
+        self.assertIn(
+            "CONTINUATION_MISSING",
             {issue.code for issue in report.issues},
         )
 

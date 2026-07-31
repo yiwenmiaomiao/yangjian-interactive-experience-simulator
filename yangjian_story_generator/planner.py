@@ -190,6 +190,28 @@ class HermesModelClient:
       ]
     }}
   ],
+  "npc_profiles": [
+    {{
+      "profile_id": "npc_profile_1",
+      "requirement_id": "npc_req_1",
+      "narrative_function": "catalyst",
+      "name": "NPC姓名",
+      "public_role": "公开身份",
+      "personality": ["稳定人格特征"],
+      "background": "完整但简洁的背景",
+      "expression_style": "表达方式",
+      "goals": ["角色目标"],
+      "relation_to_yangjian": "与杨戬的初始关系",
+      "relation_to_user": "与用户的初始关系",
+      "knows": ["允许知道的事实ID"],
+      "must_not_know": ["绝对不可知道的事实ID"],
+      "behavior_boundaries": ["不可突破的行为边界"],
+      "memory_seed": ["初始记忆"],
+      "story_bindings": ["side_1", "s1_1"],
+      "reusable": false,
+      "profile_version": 1
+    }}
+  ],
   "secrets": [],
   "foreshadowing": [],
   "global_constraints": [],
@@ -226,6 +248,19 @@ def _sanitize_plan(data: dict[str, Any]) -> dict[str, Any]:
         data["secrets"] = [
             s for s in data["secrets"]
             if isinstance(s, dict) and s.get("secret_id") and s.get("description")
+        ]
+    if "npc_profiles" in data:
+        data["npc_profiles"] = [
+            profile
+            for profile in data["npc_profiles"]
+            if (
+                isinstance(profile, dict)
+                and profile.get("profile_id")
+                and profile.get("requirement_id")
+                and profile.get("name")
+                and profile.get("personality")
+                and profile.get("goals")
+            )
         ]
     # 清理 side_arcs
     if "side_arcs" in data:

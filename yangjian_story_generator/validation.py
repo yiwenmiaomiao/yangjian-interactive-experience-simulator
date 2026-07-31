@@ -54,6 +54,7 @@ class StoryPlanValidator:
         issues.extend(self._validate_main_arc(plan.main_arc))
         for side_arc in plan.side_arcs:
             issues.extend(self._validate_side_arc(side_arc, plan.story_id))
+        issues.extend(self._validate_npc_profiles(plan))
         issues.extend(self._validate_cross_references(plan))
         issues.extend(self._validate_information_boundaries(plan))
 
@@ -69,6 +70,56 @@ class StoryPlanValidator:
                     "DUPLICATE_ARC_ID",
                     f"Arc id is duplicated: {arc_id}",
                     arc_id,
+                )
+            )
+        return issues
+
+    def _validate_npc_profiles(self, plan: StoryPlan) -> list[ValidationIssue]:
+        issues: list[ValidationIssue] = []
+        requirement_ids = {
+            requirement.requirement_id
+            for arc in plan.side_arcs
+            for requirement in arc.npc_requirements
+        }
+        profile_ids = [profile.profile_id for profile in plan.npc_profiles]
+        for duplicate in self._duplicates(profile_ids):
+            issues.append(
+                self._error(
+                    "DUPLICATE_NPC_PROFILE",
+                    f"NPC profile id is duplicated: {duplicate}",
+                    plan.story_id,
+                )
+            )
+
+        profile_requirement_ids = [
+            profile.requirement_id for profile in plan.npc_profiles
+        ]
+        for duplicate in self._duplicates(profile_requirement_ids):
+            issues.append(
+                self._error(
+                    "DUPLICATE_PROFILE_REQUIREMENT",
+                    f"Multiple profiles target requirement: {duplicate}",
+                    plan.story_id,
+                )
+            )
+
+        unknown = set(profile_requirement_ids) - requirement_ids
+        for requirement_id in sorted(unknown):
+            issues.append(
+                self._error(
+                    "NPC_PROFILE_REQUIREMENT_UNKNOWN",
+                    f"Profile references unknown requirement: {requirement_id}",
+                    plan.story_id,
+                )
+            )
+
+        missing = requirement_ids - set(profile_requirement_ids)
+        for requirement_id in sorted(missing):
+            issues.append(
+                self._error(
+                    "NPC_PROFILE_MISSING",
+                    f"Requirement has no complete NPC profile: {requirement_id}",
+                    plan.story_id,
                 )
             )
         return issues

@@ -45,7 +45,7 @@ class NPCManager:
         self,
         *,
         repository: NPCRepository,
-        profile_generator: NPCProfileGenerator,
+        profile_generator: NPCProfileGenerator | None = None,
         runtime: NPCRuntime | None = None,
         async_runtime: AsyncNPCRuntime | None = None,
         semantic_reviewer: SemanticReuseReviewer | None = None,
@@ -60,6 +60,46 @@ class NPCManager:
     @property
     def repository(self) -> NPCRepository:
         return self._repository
+
+    def register_profile(
+        self,
+        profile: NPCProfile,
+        *,
+        story_id: str,
+        requirement_id: str,
+    ) -> NPCRecord:
+        """Register a complete Story Generator profile without invoking an LLM."""
+        existing = self._repository.get(profile.npc_id)
+        if existing is not None:
+            if existing.profile.profile_version != profile.profile_version:
+                raise ValueError(
+                    f"Profile version conflict for {profile.npc_id}: "
+                    f"{existing.profile.profile_version} != {profile.profile_version}"
+                )
+            return existing
+        normalized = replace(
+            profile,
+            status=NPCStatus.READY,
+            profile_id=profile.profile_id or profile.npc_id,
+            source_requirement_ids=tuple(
+                dict.fromkeys((*profile.source_requirement_ids, requirement_id))
+            ),
+        )
+        record = NPCRecord(
+            profile=normalized,
+            memory=NPCMemory(
+                important_events=tuple(
+                    f"profile_seed:{item}" for item in normalized.memory_seed
+                )
+            ),
+            story_ids=(story_id,),
+            last_transition_reason=(
+                f"Registered Story Generator profile for {requirement_id}"
+            ),
+        )
+        self._repository.save(record)
+        self.metrics.generated_count += 1
+        return record
 
     def acquire(self, requirement: NPCRequirement) -> NPCRecord:
         candidate = self._select_reuse_candidate(requirement)
@@ -77,6 +117,11 @@ class NPCManager:
             self.metrics.reuse_count += 1
             return record
 
+        if self._profile_generator is None:
+            raise NPCIntegrationPendingError(
+                "No registered profile matches the requirement; "
+                "Story Generator must provide NPCProfileCatalog"
+            )
         profile = self._profile_generator.generate(requirement)
         if self._repository.get(profile.npc_id) is not None:
             raise ValueError(f"Generated duplicate npc_id: {profile.npc_id}")

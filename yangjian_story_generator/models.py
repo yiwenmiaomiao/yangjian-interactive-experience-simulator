@@ -179,6 +179,53 @@ class NPCRequirement:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class NPCProfileSpec:
+    """Complete NPC profile generated with the private StoryPlan.
+
+    NPC Manager registers this profile; it must not invent personality or
+    knowledge at runtime.
+    """
+
+    profile_id: str
+    requirement_id: str
+    narrative_function: NarrativeFunction
+    name: str
+    public_role: str
+    personality: tuple[str, ...]
+    background: str
+    expression_style: str
+    goals: tuple[str, ...]
+    relation_to_yangjian: str
+    relation_to_user: str
+    knows: tuple[str, ...] = ()
+    must_not_know: tuple[str, ...] = ()
+    behavior_boundaries: tuple[str, ...] = ()
+    memory_seed: tuple[str, ...] = ()
+    story_bindings: tuple[str, ...] = ()
+    reusable: bool = True
+    profile_version: int = 1
+
+    def __post_init__(self) -> None:
+        _require_text(self.profile_id, "profile_id")
+        _require_text(self.requirement_id, "requirement_id")
+        _require_text(self.name, "NPC name")
+        _require_text(self.public_role, "NPC public role")
+        _require_text(self.background, "NPC background")
+        _require_text(self.expression_style, "NPC expression_style")
+        if not self.personality:
+            raise ValueError("NPC personality must not be empty")
+        if not self.goals:
+            raise ValueError("NPC goals must not be empty")
+        if self.profile_version < 1:
+            raise ValueError("profile_version must be at least 1")
+        overlap = set(self.knows) & set(self.must_not_know)
+        if overlap:
+            raise ValueError(
+                f"NPC profile both knows and must not know: {sorted(overlap)}"
+            )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class StoryBeat:
     beat_id: str
     purpose: str
@@ -279,6 +326,7 @@ class StoryPlan:
     side_arcs: tuple[SideArc, ...] = ()
     secrets: tuple[Secret, ...] = ()
     foreshadowing: tuple[Foreshadowing, ...] = ()
+    npc_profiles: tuple[NPCProfileSpec, ...] = ()
     global_constraints: tuple[str, ...] = ()
     forbidden_reveals: tuple[str, ...] = ()
 

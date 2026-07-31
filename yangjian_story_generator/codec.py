@@ -14,6 +14,7 @@ from .models import (
     Foreshadowing,
     MainArc,
     NarrativeFunction,
+    NPCProfileSpec,
     NPCRequirement,
     Secret,
     SideArc,
@@ -79,6 +80,9 @@ def story_plan_from_dict(data: Mapping[str, Any]) -> StoryPlan:
         foreshadowing=tuple(
             _foreshadowing(item) for item in data.get("foreshadowing", ())
             if item and item.get("foreshadowing_id") and item.get("setup_beat_id") and item.get("payoff_beat_id")
+        ),
+        npc_profiles=tuple(
+            _npc_profile(item) for item in data.get("npc_profiles", ())
         ),
         global_constraints=tuple(data.get("global_constraints", ())),
         forbidden_reveals=tuple(data.get("forbidden_reveals", ())),
@@ -149,6 +153,31 @@ def _npc_requirement(data: Mapping[str, Any]) -> NPCRequirement:
         exit_condition=str(data.get("exit_condition", "")),
         reusable=bool(data.get("reusable", True)),
         constraints=tuple(data.get("constraints", ())),
+    )
+
+
+def _npc_profile(data: Mapping[str, Any]) -> NPCProfileSpec:
+    return NPCProfileSpec(
+        profile_id=str(data["profile_id"]),
+        requirement_id=str(data["requirement_id"]),
+        narrative_function=NarrativeFunction(
+            data.get("narrative_function", "catalyst")
+        ),
+        name=str(data["name"]),
+        public_role=str(data["public_role"]),
+        personality=tuple(data.get("personality", ())),
+        background=str(data.get("background", "")),
+        expression_style=str(data.get("expression_style", "")),
+        goals=tuple(data.get("goals", ())),
+        relation_to_yangjian=str(data.get("relation_to_yangjian", "")),
+        relation_to_user=str(data.get("relation_to_user", "")),
+        knows=tuple(data.get("knows", ())),
+        must_not_know=tuple(data.get("must_not_know", ())),
+        behavior_boundaries=tuple(data.get("behavior_boundaries", ())),
+        memory_seed=tuple(data.get("memory_seed", ())),
+        story_bindings=tuple(data.get("story_bindings", ())),
+        reusable=bool(data.get("reusable", True)),
+        profile_version=int(data.get("profile_version", 1)),
     )
 
 

@@ -22,6 +22,7 @@ class DirectorContext:
     consecutive_holds: int = 0
     recent_task_signatures: tuple[str, ...] = ()
     forbidden_outcome_fragments: tuple[str, ...] = ()
+    available_npc_profiles: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -129,43 +130,69 @@ def validate_directive(
                     )
                 )
 
-    hold = payload.get("hold")
-    hold_requested = isinstance(hold, Mapping) and hold.get("requested") is True
-    if tasks and hold_requested:
+    npc_commands = payload.get("npc_commands", [])
+    if not isinstance(npc_commands, list):
         issues.append(
             _issue(
-                "HOLD_WITH_TASKS",
-                "hold cannot be requested when tasks are assigned",
+                "NPC_COMMANDS_INVALID",
+                "npc_commands must be a list",
+                "npc_commands",
+            )
+        )
+        npc_commands = []
+    for index, command in enumerate(npc_commands):
+        location = f"npc_commands[{index}]"
+        if not isinstance(command, Mapping):
+            issues.append(
+                _issue("NPC_COMMAND_INVALID", "command must be an object", location)
+            )
+            continue
+        operation = command.get("operation")
+        if operation not in {
+            "ensure_registered",
+            "activate",
+            "deactivate",
+            "complete",
+        }:
+            issues.append(
+                _issue(
+                    "NPC_OPERATION_INVALID",
+                    f"unsupported NPC operation: {operation}",
+                    location,
+                )
+            )
+        profile_id = command.get("profile_id")
+        if (
+            operation in {"ensure_registered", "activate"}
+            and profile_id not in context.available_npc_profiles
+        ):
+            issues.append(
+                _issue(
+                    "NPC_PROFILE_NOT_AVAILABLE",
+                    f"profile is not supplied by StoryPlan: {profile_id}",
+                    location,
+                )
+            )
+
+    hold = payload.get("hold")
+    if isinstance(hold, Mapping) and hold.get("requested") is True:
+        issues.append(
+            _issue(
+                "DIRECTOR_HOLD_FORBIDDEN",
+                "Director cannot stop the runtime; actors may request abstention",
                 "hold",
             )
         )
-    if not tasks and not hold_requested:
+
+    fallback_world_event = payload.get("fallback_world_event")
+    if not tasks and not npc_commands and not isinstance(fallback_world_event, Mapping):
         issues.append(
             _issue(
                 "DIRECTOR_IDLE",
-                "assign at least one task or request a justified hold",
+                "assign a task, issue an NPC command, or provide a fallback world event",
                 "tasks",
             )
         )
-    if hold_requested:
-        if context.consecutive_holds >= 1:
-            issues.append(
-                _issue(
-                    "REPEATED_HOLD",
-                    "hold cannot be used in consecutive turns",
-                    "hold",
-                )
-            )
-        reason = hold.get("reason")
-        wait_for = hold.get("wait_for")
-        if not isinstance(reason, str) or not reason.strip():
-            issues.append(
-                _issue("HOLD_REASON_MISSING", "hold needs a reason", "hold")
-            )
-        if not isinstance(wait_for, str) or not wait_for.strip():
-            issues.append(
-                _issue("HOLD_WAIT_MISSING", "hold needs wait_for", "hold")
-            )
 
     side_arc = payload.get("selected_side_arc")
     if side_arc is not None and side_arc not in context.unlocked_side_arcs:
@@ -223,11 +250,16 @@ def validate_resolution(
         else:
             seen.add(str(proposal_id))
 
-        if decision.get("result") not in {"accept", "modify", "reject"}:
+        if decision.get("result") not in {
+            "accept",
+            "modify",
+            "reject",
+            "accept_abstention",
+        }:
             issues.append(
                 _issue(
                     "DECISION_RESULT_INVALID",
-                    "result must be accept, modify or reject",
+                    "result must adjudicate an action or abstention",
                     location,
                 )
             )
@@ -300,6 +332,40 @@ def validate_resolution(
                 "next_beat",
             )
         )
+
+    continuation = payload.get("continuation")
+    if not isinstance(continuation, Mapping):
+        issues.append(
+            _issue(
+                "CONTINUATION_MISSING",
+                "Director must always provide a continuation plan",
+                "continuation",
+            )
+        )
+    else:
+        kind = continuation.get("kind")
+        if kind not in {
+            "continue_current",
+            "redispatch",
+            "world_event",
+            "advance",
+        }:
+            issues.append(
+                _issue(
+                    "CONTINUATION_INVALID",
+                    f"unsupported continuation kind: {kind}",
+                    "continuation",
+                )
+            )
+        reason = continuation.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            issues.append(
+                _issue(
+                    "CONTINUATION_REASON_MISSING",
+                    "continuation requires a reason",
+                    "continuation",
+                )
+            )
 
     return GuardReport(issues=tuple(issues))
 

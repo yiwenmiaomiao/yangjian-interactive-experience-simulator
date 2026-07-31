@@ -39,6 +39,14 @@ def npc_record_from_dict(data: Mapping[str, Any]) -> NPCRecord:
         relation_to_yangjian=str(profile_data["relation_to_yangjian"]),
         relation_to_user=str(profile_data["relation_to_user"]),
         expression_style=str(profile_data["expression_style"]),
+        profile_id=str(profile_data.get("profile_id", profile_data["npc_id"])),
+        personality=tuple(profile_data.get("personality", ())),
+        goals=tuple(profile_data.get("goals", ())),
+        behavior_boundaries=tuple(
+            profile_data.get("behavior_boundaries", ())
+        ),
+        memory_seed=tuple(profile_data.get("memory_seed", ())),
+        story_bindings=tuple(profile_data.get("story_bindings", ())),
         knows=tuple(profile_data.get("knows", ())),
         must_not_know=tuple(profile_data.get("must_not_know", ())),
         supported_functions=tuple(

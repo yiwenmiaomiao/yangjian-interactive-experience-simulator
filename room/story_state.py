@@ -10,7 +10,12 @@ import os
 from typing import Any
 import runtime_context
 
-from yangjian_story_generator.models import StoryPlan, StoryBeat, SideArc
+from yangjian_story_generator.models import (
+    NPCProfileSpec,
+    StoryPlan,
+    StoryBeat,
+    SideArc,
+)
 
 PROFILE_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
     "YANGJIAN_PROJECT_DIR",
@@ -224,6 +229,49 @@ def get_current_npc_requirements(
         for requirement in arc.npc_requirements
         if requirement.requirement_id in required_ids
     )
+
+
+def get_npc_profile(requirement_id: str) -> NPCProfileSpec | None:
+    """Return the complete generated profile for a requirement.
+
+    Older plans are adapted deterministically so runtime never calls a profile
+    generation LLM.  Re-saving such a plan with Story Generator is recommended.
+    """
+    plan = get_plan()
+    if not plan:
+        return None
+    for profile in plan.npc_profiles:
+        if profile.requirement_id == requirement_id:
+            return profile
+    for arc in plan.side_arcs:
+        for requirement in arc.npc_requirements:
+            if requirement.requirement_id != requirement_id:
+                continue
+            return NPCProfileSpec(
+                profile_id=f"profile_{requirement.requirement_id}",
+                requirement_id=requirement.requirement_id,
+                narrative_function=requirement.narrative_function,
+                name=f"NPC-{requirement.requirement_id}",
+                public_role=requirement.purpose,
+                personality=("符合其公开身份和当前目标",),
+                background=(
+                    requirement.background_requirement
+                    or f"为{requirement.purpose}进入故事"
+                ),
+                expression_style="简洁、符合身份",
+                goals=(requirement.current_goal or requirement.purpose,),
+                relation_to_yangjian=requirement.relation_to_yangjian,
+                relation_to_user=requirement.relation_to_user,
+                knows=requirement.must_know,
+                must_not_know=requirement.must_not_know,
+                behavior_boundaries=requirement.constraints,
+                story_bindings=(
+                    requirement.story_id,
+                    requirement.side_arc_id,
+                ),
+                reusable=requirement.reusable,
+            )
+    return None
 
 
 # ── 状态变更（由 Room 调用，导演不下达） ─────────────────

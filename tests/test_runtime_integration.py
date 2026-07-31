@@ -11,9 +11,12 @@ import story_facts
 import story_state
 from yangjian_story_generator import preference_store
 from room.npc_manager import (
+    InMemoryNPCRepository,
     JsonNPCRepository,
+    NPCManager,
     NPCMemory,
     NPCProfile,
+    NPCProposal,
     NPCRecord,
     NPCStatus,
 )
@@ -34,13 +37,33 @@ class DirectorRuntimeContractTests(unittest.TestCase):
 
     def test_direct_guard_rejects_information_not_whitelisted_by_room(self) -> None:
         directive = {
-            "allowed_speakers": ["杨戬", "用户"],
-            "task_to_yangjian": "回应当前局面",
-            "info_to_yangjian": ["invented_fact"],
-            "task_to_npcs": {},
-            "info_to_npcs": {},
+            "mode": "DIRECT",
+            "chapter": "story_1",
+            "beat": "m1",
+            "observed_user_intent": {"intent": "continue", "confidence": 0.5},
+            "tasks": [{
+                "task_id": "task_1",
+                "target": "yangjian",
+                "source_reference": "m1",
+                "objective": "回应当前局面",
+                "information_ids": ["invented_fact"],
+                "success_condition": "产生符合角色的行动",
+            }],
+            "desired_progress": "maintain",
+            "selected_side_arc": None,
+            "narration": {
+                "required": False,
+                "purpose": "none",
+                "timing": "none",
+                "visible_facts": [],
+                "max_characters": 0,
+            },
+            "npc_commands": [],
+            "fallback_world_event": None,
         }
-        report = director._validate_live_directive(directive, self.beat_info)
+        report = director.validate_canonical_directive(
+            directive, self.beat_info
+        )
         self.assertFalse(report.is_valid)
         self.assertIn(
             "INFORMATION_NOT_ALLOWED",
@@ -66,7 +89,7 @@ class DirectorRuntimeContractTests(unittest.TestCase):
             "state_changes": [],
             "next_beat": "locked_beat",
         }
-        report = director._validate_live_resolution(
+        report = director.validate_canonical_resolution(
             resolution, proposals, self.beat_info
         )
         self.assertFalse(report.is_valid)
@@ -182,24 +205,21 @@ class AgentRuntimeTests(unittest.TestCase):
         )
         record = NPCRecord(profile=profile, memory=NPCMemory())
 
-        class Repository:
-            def get(self, npc_id):
-                return record if npc_id == "npc_1" else None
+        class ProposalRuntime:
+            def run_turn(self, context):
+                return NPCProposal(
+                    npc_id=context.npc_id,
+                    intent="respond",
+                    utterance="客官要看看吗？",
+                )
 
-        class Manager:
-            repository = Repository()
-
-        raw = json.dumps({
-            "npc_id": "npc_1",
-            "intent": "respond",
-            "utterance": "客官要看看吗？",
-            "action": "",
-            "proposed_effects": [],
-            "proactive": False,
-        }, ensure_ascii=False)
-        with (
-            patch.object(npc_manager_runtime, "_get_manager", return_value=Manager()),
-            patch.object(npc_manager_runtime.llm, "call", return_value=raw),
+        manager = NPCManager(
+            repository=InMemoryNPCRepository((record,)),
+            profile_generator=None,
+            runtime=ProposalRuntime(),
+        )
+        with patch.object(
+            npc_manager_runtime, "_get_manager", return_value=manager
         ):
             result = npc_manager_runtime.act_for_task(
                 "npc_1",
@@ -211,6 +231,7 @@ class AgentRuntimeTests(unittest.TestCase):
                 ["用户走近摊位"],
             )
         self.assertEqual(["客官要看看吗？"], result["dialogues"])
+        self.assertEqual(1, manager.metrics.runtime_turns)
 
     def test_json_npc_repository_survives_reconstruction(self) -> None:
         profile = NPCProfile(

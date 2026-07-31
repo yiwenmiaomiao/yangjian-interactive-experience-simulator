@@ -12,7 +12,8 @@ DIRECTIVE_SCHEMA = {
         "desired_progress",
         "selected_side_arc",
         "narration",
-        "hold",
+        "npc_commands",
+        "fallback_world_event",
     ],
     "properties": {
         "mode": {"const": "DIRECT"},
@@ -104,16 +105,38 @@ DIRECTIVE_SCHEMA = {
                 },
             },
         },
-        "hold": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["requested", "reason", "wait_for"],
-            "properties": {
-                "requested": {"type": "boolean"},
-                "reason": {"type": "string"},
-                "wait_for": {"type": "string"},
+        "npc_commands": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "command_id",
+                    "operation",
+                    "profile_id",
+                    "npc_id",
+                    "target_scene_id",
+                    "reason",
+                ],
+                "properties": {
+                    "command_id": {"type": "string", "minLength": 1},
+                    "operation": {
+                        "type": "string",
+                        "enum": [
+                            "ensure_registered",
+                            "activate",
+                            "deactivate",
+                            "complete",
+                        ],
+                    },
+                    "profile_id": {"type": "string", "minLength": 1},
+                    "npc_id": {"type": ["string", "null"]},
+                    "target_scene_id": {"type": ["string", "null"]},
+                    "reason": {"type": "string", "minLength": 1},
+                },
             },
         },
+        "fallback_world_event": {"type": ["object", "null"]},
     },
 }
 
@@ -128,6 +151,7 @@ RESOLUTION_SCHEMA = {
         "decisions",
         "state_changes",
         "next_beat",
+        "continuation",
     ],
     "properties": {
         "mode": {"const": "RESOLVE"},
@@ -147,7 +171,12 @@ RESOLUTION_SCHEMA = {
                     "proposal_id": {"type": "string", "minLength": 1},
                     "result": {
                         "type": "string",
-                        "enum": ["accept", "modify", "reject"],
+                        "enum": [
+                            "accept",
+                            "modify",
+                            "reject",
+                            "accept_abstention",
+                        ],
                     },
                     "outcome_summary": {"type": "string", "minLength": 1},
                 },
@@ -167,5 +196,24 @@ RESOLUTION_SCHEMA = {
             },
         },
         "next_beat": {"type": ["string", "null"]},
+        "continuation": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "reason", "target_id", "world_event"],
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "continue_current",
+                        "redispatch",
+                        "world_event",
+                        "advance",
+                    ],
+                },
+                "reason": {"type": "string", "minLength": 1},
+                "target_id": {"type": ["string", "null"]},
+                "world_event": {"type": ["object", "null"]},
+            },
+        },
     },
 }

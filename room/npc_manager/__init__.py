@@ -37,6 +37,7 @@ from .permissions import (
 from .prompting import (
     NPC_BASE_SYSTEM_PROMPT,
     NPC_PROPOSAL_SCHEMA,
+    NPC_TURN_RESULT_SCHEMA,
     build_npc_turn_input,
     build_npc_turn_input_json,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "NPCIntegrationPendingError",
     "NPC_BASE_SYSTEM_PROMPT",
     "NPC_PROPOSAL_SCHEMA",
+    "NPC_TURN_RESULT_SCHEMA",
     "NPCManager",
     "NPCMemory",
     "NPCNotFoundError",

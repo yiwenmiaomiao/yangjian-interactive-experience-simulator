@@ -26,6 +26,7 @@ class NarrativeFunction(StrEnum):
     MIRROR = "mirror"
     CLUE_SOURCE = "clue_source"
     TEMPORARY_COMPANION = "temporary_companion"
+    ANTAGONIST = "antagonist"
 
 
 class TaskSource(StrEnum):
@@ -46,6 +47,12 @@ class NPCProfile:
     relation_to_yangjian: str
     relation_to_user: str
     expression_style: str
+    profile_id: str = ""
+    personality: tuple[str, ...] = ()
+    goals: tuple[str, ...] = ()
+    behavior_boundaries: tuple[str, ...] = ()
+    memory_seed: tuple[str, ...] = ()
+    story_bindings: tuple[str, ...] = ()
     knows: tuple[str, ...] = ()
     must_not_know: tuple[str, ...] = ()
     supported_functions: tuple[NarrativeFunction, ...] = ()

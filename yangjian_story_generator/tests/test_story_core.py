@@ -11,6 +11,7 @@ from yangjian_story_generator import (
     Ending,
     MainArc,
     NarrativeFunction,
+    NPCProfileSpec,
     NPCRequirement,
     PreferenceSnapshot,
     SideArc,
@@ -108,6 +109,23 @@ def valid_plan() -> StoryPlan:
         theme="Trust",
         main_arc=main,
         side_arcs=(side,),
+        npc_profiles=(
+            NPCProfileSpec(
+                profile_id="npc_1",
+                requirement_id="npc_req_1",
+                narrative_function=NarrativeFunction.CATALYST,
+                name="Messenger",
+                public_role="Temporary messenger",
+                personality=("direct",),
+                background="Carries a request into the current scene.",
+                expression_style="brief",
+                goals=("Request assistance.",),
+                relation_to_yangjian="Acquaintance",
+                relation_to_user="Stranger",
+                must_not_know=("main_ending",),
+                story_bindings=("side_1", "s1"),
+            ),
+        ),
         forbidden_reveals=("main_ending",),
     )
 
@@ -168,6 +186,11 @@ class StoryValidationTests(unittest.TestCase):
         report = StoryPlanValidator().validate(invalid)
 
         self.assertTrue(report.by_code("UNKNOWN_NPC_REQUIREMENT"))
+
+    def test_each_npc_requirement_needs_a_complete_profile(self) -> None:
+        invalid = replace(valid_plan(), npc_profiles=())
+        report = StoryPlanValidator().validate(invalid)
+        self.assertTrue(report.by_code("NPC_PROFILE_MISSING"))
 
     def test_npc_requirement_must_match_story_and_side_arc(self) -> None:
         plan = valid_plan()

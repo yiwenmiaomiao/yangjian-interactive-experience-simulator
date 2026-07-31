@@ -32,11 +32,19 @@ if https_proxy:
     PROXIES["https"] = https_proxy
 
 
-def call(system, messages, temperature=0.7, max_tokens=2000, agent_id: str = ""):
+def call(
+    system,
+    messages,
+    temperature=0.7,
+    max_tokens=2000,
+    agent_id: str = "",
+    response_format=None,
+):
     """调用 LLM，返回文本响应。
 
     Args:
         agent_id: 用于 Langfuse 日志的 agent 名称
+        response_format: 可选 JSON 模式，例如 {"type": "json_object"}
     """
     if not API_KEY:
         return "【错误：DEEPSEEK_API_KEY 未设置】"
@@ -50,6 +58,8 @@ def call(system, messages, temperature=0.7, max_tokens=2000, agent_id: str = "")
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if response_format is not None:
+        payload["response_format"] = response_format
 
     headers = {
         "Authorization": f"Bearer {API_KEY}",

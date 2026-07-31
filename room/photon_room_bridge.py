@@ -6,26 +6,49 @@ ROOM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "room")
 sys.path.insert(0, ROOM_DIR)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from room import tick, format_output
-import story_state as ss, director
-from deliver import deliver_outputs
+if __package__:
+    from .room import tick, format_output
+    from . import room as room_mod
+    from . import story_state as ss, director
+    from .deliver import deliver_outputs
+else:
+    from room import tick, format_output
+    import room as room_mod
+    import story_state as ss, director
+    from deliver import deliver_outputs
 
 
 def ensure_story_active():
     plan = ss.get_plan()
-    if plan and ss.load_state().get("status") == "active":
-        import room as room_mod
+    if not plan:
+        plan_path = ss.DEFAULT_PLAN_PATH
+        if os.path.exists(plan_path):
+            plan = ss.load_plan(plan_path)
+
+    if not plan:
+        return False
+
+    persisted_state = ss.load_state()
+    if persisted_state.get("status") == "active":
+        beat_info = ss.get_current_beat_info(persisted_state)
+        if beat_info.get("error"):
+            return False
+        director.set_story_context(beat_info)
         room_mod._story_plan_active = True
         return True
-    plan_path = os.path.join(os.path.dirname(ROOM_DIR), "contexts/story_plan_story_1.json")
-    if os.path.exists(plan_path):
-        ss.load_plan(plan_path)
-        ss.reset_state()
+
+    # Only a pristine inactive state starts from the first beat. Completed or
+    # otherwise progressed stories must never be reset implicitly on startup.
+    if (
+        persisted_state.get("status") == "inactive"
+        and not persisted_state.get("current_beat_id")
+        and not persisted_state.get("completed_beats")
+    ):
         state = ss.activate_plan()
         director.set_story_context(ss.get_current_beat_info(state))
-        import room as room_mod
         room_mod._story_plan_active = True
         return True
+
     return False
 
 

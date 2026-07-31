@@ -42,6 +42,7 @@ from .prompting import (
 )
 from .registry import (
     InMemoryNPCRepository,
+    JsonNPCRepository,
     ReuseCandidate,
     find_reuse_candidates,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "AcceptedNPCEvent",
     "DirectorTask",
     "InMemoryNPCRepository",
+    "JsonNPCRepository",
     "InvalidLifecycleTransition",
     "ManagerMetrics",
     "NPCIntegrationPendingError",

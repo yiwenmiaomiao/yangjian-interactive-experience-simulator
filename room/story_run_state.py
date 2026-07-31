@@ -53,7 +53,10 @@ class StoryRunState:
 # ── 持久化 ──────────────────────────────────────────────
 
 
-BASE_DIR = os.path.expanduser("/Users/xiaoxianhan/Documents/yangjian-room")
+BASE_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "YANGJIAN_PROJECT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)))
 STORY_RUN_DIR = os.path.join(BASE_DIR, "story_runs")
 
 

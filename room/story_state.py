@@ -8,10 +8,14 @@ from __future__ import annotations
 import json
 import os
 from typing import Any
+import runtime_context
 
 from yangjian_story_generator.models import StoryPlan, StoryBeat, SideArc
 
-PROFILE_DIR = os.path.expanduser("/Users/xiaoxianhan/Documents/yangjian-room")
+PROFILE_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "YANGJIAN_PROJECT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)))
 STORY_STATE_PATH = os.path.join(PROFILE_DIR, "story_state.json")
 DEFAULT_PLAN_PATH = os.path.join(PROFILE_DIR, "contexts/story_plan_story_1.json")
 
@@ -64,14 +68,15 @@ def default_state() -> dict[str, Any]:
 
 
 def load_state() -> dict[str, Any]:
-    if os.path.exists(STORY_STATE_PATH):
-        with open(STORY_STATE_PATH, encoding="utf-8") as f:
+    path = runtime_context.scoped_path(STORY_STATE_PATH)
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     return default_state()
 
 
 def save_state(state: dict[str, Any]) -> None:
-    with open(STORY_STATE_PATH, "w", encoding="utf-8") as f:
+    with open(runtime_context.scoped_path(STORY_STATE_PATH), "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
@@ -130,6 +135,7 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
                         for t in transitions
                     ],
                     "available_side_arcs": [],
+                    "npc_requirement_ids": [],
                     "main_progress": state.get("main_progress", 0.0),
                     "flags": dict(state.get("flags", {})),
                     "consequences": list(state.get("selected_branch_consequences", [])),
@@ -169,6 +175,7 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
         "forbidden_reveals": list(beat.forbidden_reveals),
         "available_transitions": transitions,
         "available_side_arcs": available_side_arcs,
+        "npc_requirement_ids": list(beat.npc_requirement_ids),
         "main_progress": state.get("main_progress", 0.0),
         "flags": dict(state.get("flags", {})),
         "consequences": list(state.get("selected_branch_consequences", [])),
@@ -197,6 +204,26 @@ def _find_arc(plan: StoryPlan, beat_id: str) -> str | None:
             if beat.beat_id == beat_id:
                 return arc.arc_id
     return None
+
+
+def get_current_npc_requirements(
+    state: dict[str, Any] | None = None,
+) -> tuple[Any, ...]:
+    """Return full NPC requirements for Room only; never expose them to agents."""
+    plan = get_plan()
+    if not plan:
+        return ()
+    state = state or load_state()
+    beat = _find_beat(plan, state.get("current_beat_id", ""))
+    if not beat:
+        return ()
+    required_ids = set(beat.npc_requirement_ids)
+    return tuple(
+        requirement
+        for arc in plan.side_arcs
+        for requirement in arc.npc_requirements
+        if requirement.requirement_id in required_ids
+    )
 
 
 # ── 状态变更（由 Room 调用，导演不下达） ─────────────────

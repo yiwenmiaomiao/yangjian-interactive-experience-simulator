@@ -9,8 +9,12 @@ import os, json
 import llm
 from langfuse_logger import LangfuseCtx, log_generation, flush as lf_flush
 
-SOUL_PATH = os.path.expanduser("~/Documents/yangjian-room/SOUL.md")
-MEMORY_PATH = os.path.expanduser("~/Documents/yangjian-room/memories/MEMORY.md")
+PROJECT_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "YANGJIAN_PROJECT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)))
+SOUL_PATH = os.path.join(PROJECT_DIR, "SOUL.md")
+MEMORY_PATH = os.path.join(PROJECT_DIR, "memories", "MEMORY.md")
 
 
 def _load_soul():
@@ -65,10 +69,17 @@ def act(director_decision, perception):
     
     # 提取杨戬阶段目标
     my_goal = "无特殊要求"
-    for story_key, goals in director_decision.get("goals", {}).items():
-        if "杨戬" in goals:
-            my_goal = goals["杨戬"]
-            break
+    goals = director_decision.get("goals", {})
+    direct_goal = goals.get("杨戬") if isinstance(goals, dict) else None
+    if isinstance(direct_goal, str) and direct_goal.strip():
+        my_goal = direct_goal
+    else:
+        for story_goals in goals.values() if isinstance(goals, dict) else ():
+            if isinstance(story_goals, dict):
+                nested_goal = story_goals.get("杨戬")
+                if isinstance(nested_goal, str) and nested_goal.strip():
+                    my_goal = nested_goal
+                    break
     
     context = f"场景：{scene}\n事件：{event_context}"
     
@@ -103,9 +114,13 @@ def _parse_output(raw):
             # 去掉动作内容自带的【】包裹
             action = action.strip("【】")
             actions.append(action)
-        elif line.startswith("（") or line.startswith("【"):
+        elif (
+            (line.startswith("「") and line.endswith("」"))
+            or line.startswith("（")
+            or line.startswith("【")
+        ):
             # 可能是标注，去掉外层括号
-            text = line.strip("【】（）")
+            text = line.strip("「」【】（）")
             actions.append(text)
         else:
             dialogues.append(line)

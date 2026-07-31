@@ -62,6 +62,10 @@ INPUT_TEMPLATE = """## narration_task
 
 {event_context}
 
+## 当前已确认的公共事实
+
+{facts_summary}
+
 ## 最大字符数
 
 {max_chars}
@@ -82,6 +86,7 @@ def speak(director_decision, state, max_chars: int = 200):
     scene = director_decision.get("scene", "")
     mood = director_decision.get("mood", "")
     outcome = director_decision.get("outcome", "")
+    facts_summary = director_decision.get("facts_summary", "")
 
     # 判断是否需要旁白：导演的 order 中有"旁白"时才需要
     order = director_decision.get("order", [])
@@ -116,6 +121,7 @@ def speak(director_decision, state, max_chars: int = 200):
         scene=scene or "无特别变化",
         outcome=outcome or "无",
         event_context=event_context or "无此前事件",
+        facts_summary=facts_summary or "无",
         max_chars=str(max_chars),
     )
 
@@ -131,8 +137,7 @@ def speak(director_decision, state, max_chars: int = 200):
     if not result or result in ("", "“”", "''", "（空）", "(空)"):
         return ""
 
-    # 超过 max_chars 两倍则截断（安全兜底）
-    if len(result) > max_chars * 2:
-        result = result[:max_chars] + "……"
+    if len(result) > max_chars:
+        result = result[:max_chars]
 
     return result

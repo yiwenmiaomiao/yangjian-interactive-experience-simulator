@@ -71,21 +71,21 @@ def process_message(text: str) -> bool:
     """处理一条消息，返回是否成功。"""
     import importlib
     pb = importlib.import_module("photon_room_bridge")
-    from deliver import deliver_outputs
 
     print(f"[poll] 处理: {text[:60]}...", file=sys.stderr)
-    result = pb.handle_message(text)
+    result = pb.handle_and_deliver(text, delay=2.0)
 
     if not result.get("ok"):
         print(f"[poll] tick 失败: {result.get('error','')}", file=sys.stderr)
         return False
 
-    outputs = result.get("output", [])
-    if not outputs:
+    delivery = result.get("delivery", {})
+    sent = delivery.get("sent", 0)
+    skipped = delivery.get("skipped", 0)
+    if not result.get("output", []):
         print(f"[poll] 无输出", file=sys.stderr)
         return True
 
-    sent, skipped = deliver_outputs(outputs, delay=2.0)
     print(f"[poll] 发送 {sent}, 跳过 {skipped}", file=sys.stderr)
     return sent > 0
 

@@ -13,10 +13,15 @@ from typing import Any
 
 from .models import CanonicalEvent, CharacterContext, PreferenceSnapshot
 
+PROJECT_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "YANGJIAN_PROJECT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)))
+
 
 def _resolve(rel: str) -> str:
     """Resolve a relative path under the b profile directory."""
-    return os.path.join(os.path.expanduser("/Users/xiaoxianhan/Documents/yangjian-room"), rel)
+    return os.path.join(PROJECT_DIR, rel)
 
 
 # ── 原始资料加载 ─────────────────────────────────────────────

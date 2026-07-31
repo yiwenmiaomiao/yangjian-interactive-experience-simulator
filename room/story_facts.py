@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import json, os, copy, datetime
 from typing import Any
+import runtime_context
 
-BASE_DIR = os.path.expanduser("/Users/xiaoxianhan/Documents/yangjian-room")
+BASE_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "YANGJIAN_PROJECT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)))
 FACTS_PATH = os.path.join(BASE_DIR, "world_facts.json")
 
 
@@ -32,8 +36,9 @@ def default_facts() -> dict[str, Any]:
 
 
 def load_facts() -> dict[str, Any]:
-    if os.path.exists(FACTS_PATH):
-        with open(FACTS_PATH, encoding="utf-8") as f:
+    path = runtime_context.scoped_path(FACTS_PATH)
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     return default_facts()
 
@@ -41,7 +46,7 @@ def load_facts() -> dict[str, Any]:
 def save_facts(facts: dict[str, Any]) -> None:
     facts["version"] = facts.get("version", 0) + 1
     facts["updated_at"] = datetime.datetime.now().isoformat()
-    with open(FACTS_PATH, "w", encoding="utf-8") as f:
+    with open(runtime_context.scoped_path(FACTS_PATH), "w", encoding="utf-8") as f:
         json.dump(facts, f, ensure_ascii=False, indent=2)
 
 

@@ -4,7 +4,10 @@
 """
 import os, re, json
 
-PROFILE_DIR = os.path.expanduser("/Users/xiaoxianhan/Documents/yangjian-room")
+PROFILE_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "YANGJIAN_PROJECT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)))
 STORIES_DIR = os.path.join(PROFILE_DIR, "stories")
 
 PHASE_HEADER_RE = re.compile(r"^## Phase (\d+)", re.MULTILINE)

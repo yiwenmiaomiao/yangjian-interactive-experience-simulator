@@ -18,15 +18,32 @@ import os
 import sys
 import json
 import traceback
+import threading
+from functools import wraps
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import state_manager, story_engine, director, narrator, yangjian, npc_manager_runtime as npc
+import runtime_context
 
-PROFILE_DIR = os.path.expanduser("/Users/xiaoxianhan/Documents/yangjian-room")
+PROFILE_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "YANGJIAN_PROJECT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)))
 
 # 是否启用故事计划模式
 _story_plan_active = False
+_TICK_LOCK = threading.RLock()
+
+
+def _serialized_tick(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with _TICK_LOCK:
+            lock_path = os.path.join(PROFILE_DIR, ".room_tick.lock")
+            with runtime_context.process_lock(lock_path):
+                return function(*args, **kwargs)
+    return wrapped
 
 
 # ── 故事计划管理 ──────────────────────────────────────────
@@ -185,7 +202,7 @@ ID: {current_beat_id}
         beats_raw = recovery_data.get("beats", [])
         
         # 验证 beats
-        if beats_raw and all(b.get("beat_id") and b.get("purpose") for b in beats_raw):
+        if _valid_recovery_beats(beats_raw, rejoin_target):
             recovery_beats = []
             for b in beats_raw:
                 recovery_beats.append({
@@ -205,10 +222,33 @@ ID: {current_beat_id}
         pass  # 如果生成失败，静默继续当前 beat
 
 
+def _valid_recovery_beats(beats: Any, rejoin_target: str) -> bool:
+    if not isinstance(beats, list) or not 1 <= len(beats) <= 2:
+        return False
+    ids = [beat.get("beat_id") for beat in beats if isinstance(beat, dict)]
+    if len(ids) != len(beats) or len(set(ids)) != len(ids) or not all(ids):
+        return False
+    allowed_targets = {*ids, rejoin_target}
+    for beat in beats:
+        if not str(beat.get("purpose", "")).strip():
+            return False
+        for transition in beat.get("transitions", []):
+            if transition.get("target_id") not in allowed_targets:
+                return False
+    return True
+
+
 # ── 主循环 ──────────────────────────────────────────────────
 
 
-def tick(user_message=None, source="cron"):
+@_serialized_tick
+def tick(
+    user_message=None,
+    source="cron",
+    *,
+    user_id: str = "default",
+    thread_id: str = "default",
+):
     """
     执行一个 Room Tick。
     
@@ -219,14 +259,39 @@ def tick(user_message=None, source="cron"):
     Returns:
         dict: {"ok": bool, "output": [...], "state": {...}, "decision": {...}}
     """
+    global _story_plan_active
+    identity_token = runtime_context.set_identity(user_id, thread_id)
     try:
         state = state_manager.load()
+        if user_message:
+            _capture_explicit_preferences(user_message, user_id)
+
+        import story_state as ss
+        plan = ss.get_plan() or ss.load_plan()
+        persisted_story = ss.load_state()
+        _story_plan_active = bool(
+            plan and persisted_story.get("status") == "active"
+        )
+        if _story_plan_active:
+            director.set_story_context(
+                ss.get_current_beat_info(persisted_story)
+            )
 
         # ── 两阶段调度：故事计划模式走 DIRECT → RESOLVE ──
         if _story_plan_active:
             return _tick_two_stage(state, user_message, source)
 
-        # ── 传统模式（一次输出） ──
+        if os.environ.get("YANGJIAN_ALLOW_LEGACY_MODE") != "1":
+            return {
+                "ok": False,
+                "error": "story_plan_not_active",
+                "output": [{
+                    "role": "系统",
+                    "text": "【故事计划未激活，已阻止旧版导演直接修改状态】",
+                }],
+            }
+
+        # ── 传统模式（仅显式兼容开关启用） ──
         decision = director.decide(state, user_message)
         
         outputs = []
@@ -338,12 +403,19 @@ def tick(user_message=None, source="cron"):
         }
     
     except Exception as e:
+        try:
+            import llm as room_llm
+            room_llm.clear_trace_context()
+        except Exception:
+            pass
         traceback.print_exc()
         return {
             "ok": False,
             "error": str(e),
             "output": [{"role": "系统", "text": f"【Room 异常: {e}】"}],
         }
+    finally:
+        runtime_context.reset_identity(identity_token)
 
 
 def tick_with_story(user_message=None, source="cron"):
@@ -380,10 +452,32 @@ def _tick_two_stage(state, user_message=None, source="cron"):
         story_id=ss_state.get("story_id", ss_state.get("current_beat_id", "story_1")),
         beat_id=ss_state.get("current_beat_id", ""),
     )
+    import llm as room_llm
+    room_llm.set_trace_context(lf_ctx)
 
     # 刷新导演上下文
     bi = ss.get_current_beat_info(ss_state)
     if "error" not in bi:
+        active_npcs = []
+        for requirement in ss.get_current_npc_requirements(ss_state):
+            npc_id = npc.acquire_for_side_arc(
+                requirement, requirement.side_arc_id
+            )
+            if not npc_id:
+                continue
+            try:
+                npc.activate(
+                    npc_id,
+                    story_id=requirement.story_id,
+                    side_arc_id=requirement.side_arc_id,
+                    scene_id=bi.get("current_beat_id", ""),
+                    reason=f"Required by {requirement.requirement_id}",
+                )
+                active_npcs.append(npc_id)
+            except Exception:
+                continue
+        bi = dict(bi)
+        bi["active_npcs"] = active_npcs
         director.set_story_context(bi)
 
     # Phase 1: DIRECTOR DIRECT
@@ -391,7 +485,18 @@ def _tick_two_stage(state, user_message=None, source="cron"):
 
     # 从 directive 构建 order（新格式：allowed_speakers）
     allowed_speakers = directive.get("allowed_speakers", ["杨戬", "用户"])
-    order = list(allowed_speakers)
+    allowed_runtime_roles = {
+        "旁白",
+        "杨戬",
+        "用户",
+        *directive.get("task_to_npcs", {}).keys(),
+    }
+    order = [
+        role for role in allowed_speakers
+        if role in allowed_runtime_roles
+    ]
+    if "用户" not in order:
+        order.append("用户")
 
     # 旁白是否需要
     has_narration = "旁白" in order
@@ -411,15 +516,8 @@ def _tick_two_stage(state, user_message=None, source="cron"):
     outputs = []
     for role in order:
         if role == "旁白" and has_narration:
-            text = narrator.speak({
-                "scene": directive.get("current_beat", ""),
-                "mood": "",
-                "outcome": directive.get("beat_purpose", ""),
-                "order": ["旁白"],
-                "goals": {},
-            }, state, max_chars=200)
-            if text:
-                outputs.append({"role": "旁白", "text": text})
+            # 旁白必须等待 RESOLVE 完成，只描述已经确认发生的结果。
+            continue
 
         elif role == "杨戬":
             from story_facts import get_facts_summary
@@ -457,16 +555,60 @@ def _tick_two_stage(state, user_message=None, source="cron"):
                 "goals": {},
             }, "")
             for a in result.get("actions", []):
-                outputs.append({"role": f"{role}的动作", "text": a})
+                outputs.append({"role": f"{role}的动作", "text": a, "npc_id": role})
             for d in result.get("dialogues", []):
-                outputs.append({"role": role, "text": d})
+                outputs.append({"role": role, "text": d, "npc_id": role})
 
         elif role == "用户":
             pass  # 等待用户输入
 
     # Phase 3: DIRECTOR RESOLVE
-    proposals = [{"role": o["role"], "text": o["text"], "npc_id": o["role"]} for o in outputs if o["role"] not in ("旁白", "用户")]
+    proposals = [
+        {
+            "proposal_id": f"proposal_{index + 1}",
+            "role": output["role"],
+            "text": output["text"],
+            "kind": "action" if output["role"].endswith("的动作") else "dialogue",
+            "npc_id": output.get("npc_id"),
+        }
+        for index, output in enumerate(outputs)
+        if output["role"] not in ("旁白", "用户")
+    ]
     resolution = director.decide_resolve(state, proposals, user_message)
+
+    # RESOLVE 是最终裁决：reject 不发布，modify 的动作使用裁决事实，
+    # dialogue 的 modify 保留已经说出的原话，但结果仍由 outcome_summary 表达。
+    forbidden_fragments = [
+        *bi.get("forbidden_reveals", []),
+        *must_not,
+    ]
+    outputs, resolved_outcomes = _apply_resolution(
+        proposals, resolution, forbidden_fragments
+    )
+    proposal_by_id = {p["proposal_id"]: p for p in proposals}
+    for decision in resolution.get("decisions", []):
+        if decision.get("result") not in {"accept", "modify"}:
+            continue
+        proposal = proposal_by_id.get(decision.get("proposal_id"))
+        if proposal and proposal.get("npc_id"):
+            npc.record_accepted(
+                proposal["npc_id"],
+                event_id=f"tick_{state.get('tick', 0) + 1}_{proposal['proposal_id']}",
+                summary=str(decision.get("outcome_summary", "")),
+            )
+
+    # 旁白只接收已裁决结果和统一公共事实。
+    if has_narration and resolved_outcomes:
+        from story_facts import get_facts_summary
+        narration = narrator.speak({
+            "scene": directive.get("current_beat", ""),
+            "mood": "",
+            "outcome": "；".join(resolved_outcomes),
+            "order": ["旁白"],
+            "facts_summary": get_facts_summary(),
+        }, state, max_chars=100)
+        if narration and not _contains_forbidden(narration, forbidden_fragments):
+            outputs.append({"role": "旁白", "text": narration})
 
     # Phase 4: Room 保存 + 事实管理
     state["tick"] = state.get("tick", 0) + 1
@@ -489,7 +631,8 @@ def _tick_two_stage(state, user_message=None, source="cron"):
         key = change.get("key", "")
         value = change.get("value")
         if key and value is not None:
-            state_manager.apply_changes(state, {key: value})
+            if key in {"weather", "mood", "world_day"}:
+                state = state_manager.apply_changes(state, {key: value})
             from langfuse_logger import log_state_change
             log_state_change(lf_ctx, key, value, source="resolve")
             if key.startswith("item_"):
@@ -497,10 +640,16 @@ def _tick_two_stage(state, user_message=None, source="cron"):
                 sf.set_item_location(item, str(value))
             elif key.startswith("reveal_"):
                 sf.reveal_information(str(value))
+            elif key.startswith("character_"):
+                character = key.replace("character_", "")
+                sf.set_character_state(character, str(value))
 
     # 推进 beat（若有）
     next_beat = resolution.get("next_beat")
-    if next_beat:
+    unlocked_next_beats = {
+        item.get("target_id") for item in bi.get("available_transitions", [])
+    }
+    if next_beat and next_beat in unlocked_next_beats:
         ss.advance_beat(ss_state, next_beat)
         # 更新 director 缓存
         bi = ss.get_current_beat_info(ss.load_state())
@@ -535,6 +684,7 @@ def _tick_two_stage(state, user_message=None, source="cron"):
         "outcome": resolution.get("next_beat", ""),
     }
 
+    room_llm.clear_trace_context()
     return {
         "ok": True,
         "output": outputs,
@@ -543,6 +693,87 @@ def _tick_two_stage(state, user_message=None, source="cron"):
         "directive": directive,
         "resolution": resolution,
     }
+
+
+def _contains_forbidden(text: str, forbidden: list[str]) -> bool:
+    normalized = text.casefold()
+    for item in forbidden:
+        fragment = str(item).strip().casefold()
+        for prefix in ("不能透露", "禁止透露", "不得透露", "不能", "禁止", "不得"):
+            if fragment.startswith(prefix):
+                fragment = fragment[len(prefix):].strip(" ：:")
+                break
+        if fragment and fragment in normalized:
+            return True
+    return False
+
+
+def _apply_resolution(
+    proposals: list[dict[str, Any]],
+    resolution: dict[str, Any],
+    forbidden: list[str],
+) -> tuple[list[dict[str, str]], list[str]]:
+    proposal_by_id = {p["proposal_id"]: p for p in proposals}
+    outputs: list[dict[str, str]] = []
+    outcomes: list[str] = []
+    for decision in resolution.get("decisions", []):
+        proposal = proposal_by_id.get(decision.get("proposal_id"))
+        if not proposal or decision.get("result") == "reject":
+            continue
+        outcome = str(decision.get("outcome_summary", "")).strip()
+        if outcome:
+            outcomes.append(outcome)
+        text = proposal["text"]
+        if (
+            decision.get("result") == "modify"
+            and proposal["kind"] == "action"
+            and outcome
+        ):
+            text = outcome
+        if not _contains_forbidden(text, forbidden):
+            outputs.append({"role": proposal["role"], "text": text})
+    return outputs, outcomes
+
+
+def _capture_explicit_preferences(message: str, user_id: str) -> None:
+    """Record only unambiguous user feedback; never infer hidden preferences."""
+    dimensions = {
+        "搞笑": "tone.humor",
+        "幽默": "tone.humor",
+        "戏剧": "tone.drama",
+        "冲突": "intensity.conflict",
+        "节奏快": "pacing.fast",
+        "节奏慢": "pacing.slow",
+        "少描写": "style.concise_narration",
+        "简洁": "style.concise_narration",
+    }
+    positive = ("我喜欢", "我想要", "希望多", "多一点")
+    negative = ("我不喜欢", "不要", "希望少", "少一点", "太多")
+    if not any(marker in message for marker in (*positive, *negative)):
+        return
+    try:
+        from yangjian_story_generator.preference_store import (
+            DEFAULT_STORE_PATH,
+            PreferenceStore,
+        )
+        store = PreferenceStore(
+            runtime_context.scoped_path(DEFAULT_STORE_PATH),
+            user_id=user_id,
+        )
+        direction = (
+            "decrease"
+            if any(marker in message for marker in negative)
+            else "increase"
+        )
+        for keyword, dimension in dimensions.items():
+            if keyword in message:
+                store.record_feedback(
+                    dimension=dimension,
+                    direction=direction,
+                    evidence_summary=f"用户明确反馈：{message[:120]}",
+                )
+    except Exception:
+        pass
 
 
 def _tick_traditional_fallback(state, user_message=None, source="cron"):

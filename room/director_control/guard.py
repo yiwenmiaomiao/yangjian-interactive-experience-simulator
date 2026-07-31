@@ -103,16 +103,15 @@ def validate_directive(
             )
         else:
             allowed = context.allowed_information.get(str(target), frozenset())
-            if allowed:
-                unauthorized = set(info_ids) - set(allowed)
-                if unauthorized:
-                    issues.append(
-                        _issue(
-                            "INFORMATION_NOT_ALLOWED",
-                            f"unauthorized information: {sorted(unauthorized)}",
-                            location,
-                        )
+            unauthorized = set(info_ids) - set(allowed)
+            if unauthorized:
+                issues.append(
+                    _issue(
+                        "INFORMATION_NOT_ALLOWED",
+                        f"unauthorized information: {sorted(unauthorized)}",
+                        location,
                     )
+                )
 
         objective = task.get("objective")
         if not isinstance(objective, str) or not objective.strip():
@@ -351,6 +350,25 @@ def _check_narration(
                 "narration",
             )
         )
+    visible_facts = narration.get("visible_facts", [])
+    if not isinstance(visible_facts, list):
+        issues.append(
+            _issue(
+                "NARRATION_FACTS_INVALID",
+                "visible_facts must be a list",
+                "narration",
+            )
+        )
+    else:
+        unauthorized = set(visible_facts) - set(context.allowed_narration_facts)
+        if unauthorized:
+            issues.append(
+                _issue(
+                    "NARRATION_FACT_NOT_ALLOWED",
+                    f"unauthorized narration facts: {sorted(unauthorized)}",
+                    "narration",
+                )
+            )
 
 
 def _contains_forbidden(text: str, fragments: tuple[str, ...]) -> bool:

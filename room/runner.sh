@@ -1,8 +1,9 @@
 #!/bin/bash
 # Room Tick 执行脚本
-# cron 调用：bash ~/Documents/yangjian-room/room/runner.sh
+# cron 调用：bash /path/to/yangjian-room/room/runner.sh
 set -e
-cd ~/Documents/yangjian-room
+PROJECT_DIR="${YANGJIAN_PROJECT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+cd "$PROJECT_DIR"
 
 # 使用 Hermes venv 的 Python 3.11（系统 Python 3.9 不兼容新版 urllib3）
 PYTHON_BIN="${HOME}/.hermes/hermes-agent/venv/bin/python3"

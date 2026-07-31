@@ -75,15 +75,25 @@ class AggregatedPreference:
     updated_at: str
 
 
-DEFAULT_STORE_PATH = os.path.expanduser("/Users/xiaoxianhan/Documents/yangjian-room/contexts/preference_signals.json")
-DEFAULT_SNAPSHOT_PATH = os.path.expanduser("/Users/xiaoxianhan/Documents/yangjian-room/contexts/preference_snapshot.json")
+PROJECT_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "YANGJIAN_PROJECT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)))
+DEFAULT_STORE_PATH = os.path.join(PROJECT_DIR, "contexts", "preference_signals.json")
+DEFAULT_SNAPSHOT_PATH = os.path.join(PROJECT_DIR, "contexts", "preference_snapshot.json")
 
 
 class PreferenceStore:
     """偏好信号存储器与聚合器。"""
 
-    def __init__(self, store_path: str | None = None) -> None:
+    def __init__(
+        self,
+        store_path: str | None = None,
+        *,
+        user_id: str = "default",
+    ) -> None:
         self._store_path = store_path or DEFAULT_STORE_PATH
+        self._user_id = user_id
         self._signals: list[PreferenceSignal] = []
         self._profile_version = 0
         self._last_update: str | None = None
@@ -110,7 +120,7 @@ class PreferenceStore:
         signal_id = f"sig_{self._now()}_{len(self._signals)}"
         signal = PreferenceSignal(
             signal_id=signal_id,
-            user_id="xiaoxianhan",
+            user_id=self._user_id,
             observed_at=self._now(),
             source_type=source_type,
             dimension=dimension,

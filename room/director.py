@@ -22,6 +22,11 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import llm, story_engine
 from langfuse_logger import LangfuseCtx, log_generation, flush as lf_flush
+from director_control import (
+    DirectorContext,
+    validate_directive,
+    validate_resolution,
+)
 
 # ── 故事计划模式状态 ──────────────────────────────────────
 
@@ -86,6 +91,7 @@ SYSTEM_PROMPT = """你是杨戬 Room 的导演（织梦者）。
 - 例如：❌ "杨戬说：这不过是些古老的纹路"
 - info_to_yangjian 是杨戬当前能感知到的信息（不是完整故事计划）
 - info_to_npcs 是该 NPC 当前能看到的（不是完整故事计划）
+- info_to_yangjian/info_to_npcs 只能逐字复制 Room 提供的“允许透露的信息”，不能扩写
 
 ## 输出格式
 
@@ -108,7 +114,8 @@ SYSTEM_PROMPT = """你是杨戬 Room 的导演（织梦者）。
   "must_not": ["禁止做的事"],
   "branch_candidates": ["可选的分支 ID"],
   "advance_conditions": ["推进到下一 beat 的条件"],
-  "state_change_candidates": []
+  "state_change_candidates": [],
+  "observed_user_intent": {"intent": "continue / engage / divert", "confidence": 0.0}
 }
 
 ## allowed_speakers 规则
@@ -133,6 +140,7 @@ Beat 目的：{beat_purpose}
 
 可用分支目标：{transitions}
 {side_arcs_section}
+当前可调度 NPC：{active_npcs}
 已有故事事实：{consequences}
 连续偏离次数：{deviation_count}
 {recovery_note}
@@ -188,7 +196,10 @@ def _decide_traditional(state, user_message=None) -> dict[str, Any]:
         temperature=0.7,
         max_tokens=2000,
     )
-    return _parse_directive(raw)
+    directive = _parse_directive(raw)
+    if "error" not in directive:
+        directive.setdefault("order", directive.get("allowed_speakers", []))
+    return directive
 
 
 # ── 故事计划模式 ─────────────────────────────────────────
@@ -213,18 +224,24 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
         forbidden_reveals=", ".join(bi.get("forbidden_reveals", [])),
         transitions=trans_text,
         side_arcs_section=side_text,
+        active_npcs=", ".join(bi.get("active_npcs", [])) or "无",
         consequences=", ".join(bi.get("consequences", [])),
         deviation_count=bi.get("beat_tick_counter", 0),
         recovery_note="",
         user_message_display=user_msg_display,
     )
 
-    prompt = f"天气：{state.get('weather', '晴')} 氛围：{state.get('mood', '平静')} 第{state.get('world_day', 1)}天"
+    prompt = (
+        f"{context}\n"
+        f"天气：{state.get('weather', '晴')} "
+        f"氛围：{state.get('mood', '平静')} "
+        f"第{state.get('world_day', 1)}天"
+    )
 
     for attempt in range(3):
         raw = llm.call(
             agent_id="director",
-            system=SYSTEM_PROMPT + context,
+            system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=2000,
@@ -234,7 +251,8 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
             # 修正 beat 和 story_id
             directive["current_story_id"] = bi.get("story_id", "story_1")
             directive["current_beat"] = bi.get("current_beat_id", "")
-            return directive
+            if _validate_live_directive(directive, bi).is_valid:
+                return directive
         if attempt < 2:
             continue
 
@@ -247,11 +265,6 @@ def _resolve_story(state, proposals: list[dict[str, Any]], user_message=None) ->
     if not bi:
         return {"error": "no_story_context"}
 
-    proposals_text = "\n".join(
-        f" - [{p.get('npc_id', p.get('role', '?'))}] {p.get('text', '')[:80]}"
-        for p in proposals
-    )
-
     resolve_prompt = """你是导演，现在进入 RESOLVE（裁决）阶段。
 
 你收到本回合所有角色的行动提议。对每个提议做出裁决。
@@ -263,9 +276,9 @@ def _resolve_story(state, proposals: list[dict[str, Any]], user_message=None) ->
   "mode": "RESOLVE",
   "decisions": [
     {
-      "proposal_id": "角色名",
+      "proposal_id": "必须逐字复制输入中的 proposal_id",
       "result": "accept / modify / reject",
-      "outcome": "实际发生了什么（简短事实，不是文学描写）"
+      "outcome_summary": "实际发生了什么（简短事实，不是文学描写）"
     }
   ],
   "state_changes": [
@@ -278,22 +291,146 @@ def _resolve_story(state, proposals: list[dict[str, Any]], user_message=None) ->
 - accept：角色行为按其基本含义发生
 - modify：行为发生，但结果由你调整
 - reject：行为未发生或被阻止
-- outcome 写简短事实（"杨戬回避了问题"），不写文学描写
+- outcome_summary 写简短事实（"杨戬回避了问题"），不写文学描写
 - state_changes 只是提案，Room 决定是否生效
 - next_beat 只能填已解锁的 beat ID，否则 null
 """
 
-    situation = f"本回合的角色提议：\n{proposals_text}\n\n请裁决。"
-
-    raw = llm.call(
-        agent_id="director",
-        system=resolve_prompt,
-        messages=[{"role": "user", "content": situation}],
-        temperature=0.5,
-        max_tokens=1500,
+    situation = "本回合的角色提议：\n" + json.dumps(
+        proposals, ensure_ascii=False, indent=2
     )
 
-    return _parse_resolution(raw)
+    for _ in range(3):
+        raw = llm.call(
+            agent_id="director",
+            system=resolve_prompt,
+            messages=[{"role": "user", "content": situation}],
+            temperature=0.5,
+            max_tokens=1500,
+        )
+        resolution = _parse_resolution(raw)
+        resolution["mode"] = "RESOLVE"
+        resolution["chapter"] = bi.get("story_id", "story_1")
+        resolution["beat"] = bi.get("current_beat_id", "")
+        for decision in resolution.get("decisions", []):
+            if "outcome_summary" not in decision and "outcome" in decision:
+                decision["outcome_summary"] = decision.pop("outcome")
+        if _validate_live_resolution(resolution, proposals, bi).is_valid:
+            return resolution
+
+    return {
+        "mode": "RESOLVE",
+        "chapter": bi.get("story_id", "story_1"),
+        "beat": bi.get("current_beat_id", ""),
+        "decisions": [
+            {
+                "proposal_id": p["proposal_id"],
+                "result": "reject",
+                "outcome_summary": "裁决输出无效，本提议未执行",
+            }
+            for p in proposals
+        ],
+        "state_changes": [],
+        "next_beat": None,
+        "fallback": True,
+    }
+
+
+# ── Guard 适配 ────────────────────────────────────────────
+
+
+def _validate_live_directive(payload: dict[str, Any], bi: dict[str, Any]):
+    allowed_info = frozenset(bi.get("allowed_information", []))
+    tasks = []
+    yangjian_task = payload.get("task_to_yangjian", "")
+    if yangjian_task:
+        tasks.append({
+            "task_id": "task_yangjian",
+            "target": "杨戬",
+            "source_reference": bi.get("current_beat_id", ""),
+            "objective": yangjian_task,
+            "information_ids": payload.get("info_to_yangjian", []),
+            "success_condition": "产生符合当前局面的提议",
+        })
+    for npc_id, objective in payload.get("task_to_npcs", {}).items():
+        tasks.append({
+            "task_id": f"task_{npc_id}",
+            "target": npc_id,
+            "source_reference": bi.get("current_beat_id", ""),
+            "objective": objective,
+            "information_ids": payload.get("info_to_npcs", {}).get(npc_id, []),
+            "success_condition": "产生符合当前局面的提议",
+        })
+
+    canonical = {
+        "mode": "DIRECT",
+        "chapter": bi.get("story_id", "story_1"),
+        "beat": bi.get("current_beat_id", ""),
+        "observed_user_intent": payload.get(
+            "observed_user_intent", {"intent": "continue", "confidence": 0.5}
+        ),
+        "tasks": tasks,
+        "desired_progress": "maintain",
+        "selected_side_arc": None,
+        "narration": {
+            "required": "旁白" in payload.get("allowed_speakers", []),
+            "purpose": "external_event" if "旁白" in payload.get("allowed_speakers", []) else "none",
+            "timing": "after_dialogue" if "旁白" in payload.get("allowed_speakers", []) else "none",
+            "visible_facts": [],
+            "max_characters": 100 if "旁白" in payload.get("allowed_speakers", []) else 0,
+        },
+        "hold": {
+            "requested": not tasks,
+            "reason": "等待用户输入" if not tasks else "",
+            "wait_for": "user" if not tasks else "",
+        },
+    }
+    targets = frozenset({"杨戬", *bi.get("active_npcs", [])})
+    context = DirectorContext(
+        chapter=canonical["chapter"],
+        beat=canonical["beat"],
+        available_agents=targets,
+        allowed_information={target: allowed_info for target in targets},
+        allowed_source_references=frozenset({canonical["beat"]}),
+        unlocked_side_arcs=frozenset(
+            arc.get("arc_id", "") for arc in bi.get("available_side_arcs", [])
+        ),
+        narration_allowed=True,
+        allowed_narration_facts=allowed_info,
+    )
+    return validate_directive(canonical, context)
+
+
+def _validate_live_resolution(
+    payload: dict[str, Any],
+    proposals: list[dict[str, Any]],
+    bi: dict[str, Any],
+):
+    allowed_keys = frozenset(
+        change.get("key", "")
+        for change in payload.get("state_changes", [])
+        if _state_key_allowed(change.get("key", ""))
+    )
+    context = DirectorContext(
+        chapter=bi.get("story_id", "story_1"),
+        beat=bi.get("current_beat_id", ""),
+        available_agents=frozenset(),
+        allowed_information={},
+        allowed_source_references=frozenset(),
+        unlocked_next_beats=frozenset(
+            item.get("target_id", "") for item in bi.get("available_transitions", [])
+        ),
+        allowed_state_change_keys=allowed_keys,
+        proposal_ids=frozenset(p["proposal_id"] for p in proposals),
+        forbidden_outcome_fragments=tuple(bi.get("forbidden_reveals", [])),
+    )
+    return validate_resolution(payload, context)
+
+
+def _state_key_allowed(key: str) -> bool:
+    return key in {"weather", "mood", "world_day"} or key.startswith(
+        ("item_", "reveal_", "character_")
+    )
 
 
 # ── 解析 ──────────────────────────────────────────────────

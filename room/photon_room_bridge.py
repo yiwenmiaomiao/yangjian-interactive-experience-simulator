@@ -9,12 +9,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 if __package__:
     from .room import tick, format_output
     from . import room as room_mod
-    from . import story_state as ss, director
-    from .deliver import deliver_outputs
+    import story_state as ss, director
+    import runtime_context
+    from deliver import deliver_outputs
 else:
     from room import tick, format_output
     import room as room_mod
     import story_state as ss, director
+    import runtime_context
     from deliver import deliver_outputs
 
 
@@ -52,13 +54,44 @@ def ensure_story_active():
     return False
 
 
-def handle_message(user_message: str) -> dict:
-    ensure_story_active()
-    from director import _CACHED_BEAT_INFO
-    if not _CACHED_BEAT_INFO:
-        bi = ss.get_current_beat_info(ss.load_state())
-        director.set_story_context(bi)
-    result = tick(user_message=user_message, source="user")
+def handle_message(
+    user_message: str,
+    *,
+    user_id: str = "default",
+    thread_id: str = "default",
+) -> dict:
+    token = runtime_context.set_identity(user_id, thread_id)
+    try:
+        ensure_story_active()
+        if not director._CACHED_BEAT_INFO:
+            bi = ss.get_current_beat_info(ss.load_state())
+            director.set_story_context(bi)
+        return tick(
+            user_message=user_message,
+            source="user",
+            user_id=user_id,
+            thread_id=thread_id,
+        )
+    finally:
+        runtime_context.reset_identity(token)
+
+
+def handle_and_deliver(
+    user_message: str,
+    *,
+    user_id: str = "default",
+    thread_id: str = "default",
+    delay: float = 3.0,
+) -> dict:
+    """Deterministic ingress entrypoint: process once, then deliver once."""
+    result = handle_message(
+        user_message,
+        user_id=user_id,
+        thread_id=thread_id,
+    )
+    if result.get("ok"):
+        sent, skipped = deliver_outputs(result.get("output", []), delay=delay)
+        result["delivery"] = {"sent": sent, "skipped": skipped}
     return result
 
 
@@ -66,9 +99,11 @@ def process_stdin():
     msg = sys.stdin.read().strip()
     if not msg:
         return
-    result = handle_message(msg)
+    result = handle_and_deliver(msg)
     if result.get("ok"):
-        sent, skipped = deliver_outputs(result.get("output", []))
+        delivery = result.get("delivery", {})
+        sent = delivery.get("sent", 0)
+        skipped = delivery.get("skipped", 0)
         print(f"sent={sent} skipped={skipped}", file=sys.stderr)
     else:
         print(f"tick_error={result.get('error','')}", file=sys.stderr)

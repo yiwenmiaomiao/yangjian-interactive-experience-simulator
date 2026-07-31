@@ -3,20 +3,30 @@
 职责：读写 world_state.json、权限过滤感知信息
 """
 import json, os, copy, datetime
+import runtime_context
 
-PROFILE_DIR = os.path.expanduser("/Users/xiaoxianhan/Documents/yangjian-room")
+PROFILE_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "YANGJIAN_PROJECT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)))
 STATE_PATH = os.path.join(PROFILE_DIR, "world_state.json")
 
 
 def load():
     """加载世界状态"""
-    with open(STATE_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    path = runtime_context.scoped_path(STATE_PATH)
+    source = path if os.path.exists(path) else STATE_PATH
+    with open(source, "r", encoding="utf-8") as f:
+        state = json.load(f)
+    if path != source:
+        save(state)
+    return state
 
 
 def save(state):
     """保存世界状态"""
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
+    path = runtime_context.scoped_path(STATE_PATH)
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 

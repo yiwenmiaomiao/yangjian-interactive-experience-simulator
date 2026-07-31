@@ -6,7 +6,10 @@ webhook（主）+ 轮询（兜底）
 import os, sys, json, uuid, time, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-PROFILE = os.path.expanduser("~/Documents/yangjian-room")
+PROFILE = os.path.abspath(os.path.expanduser(os.environ.get(
+    "YANGJIAN_PROJECT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)))
 BB_URL = "http://127.0.0.1:1234"
 BB_PASS = os.environ.get("BLUEBUBBLES_PASSWORD", "")
 CHAT_GUID = os.environ.get("BLUEBUBBLES_CHAT_GUID", "")

@@ -57,6 +57,10 @@ class NPCManager:
         self._semantic_reviewer = semantic_reviewer
         self.metrics = ManagerMetrics()
 
+    @property
+    def repository(self) -> NPCRepository:
+        return self._repository
+
     def acquire(self, requirement: NPCRequirement) -> NPCRecord:
         candidate = self._select_reuse_candidate(requirement)
         if candidate is not None:

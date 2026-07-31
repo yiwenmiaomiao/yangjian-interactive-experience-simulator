@@ -4,6 +4,7 @@ LLM 调用封装
 优先从环境变量读取 API key，其次从 project .env 文件读取
 """
 import os, json, requests, time
+from contextvars import ContextVar
 
 # 优先环境变量，其次从 project .env 读取
 API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
@@ -18,6 +19,7 @@ if not API_KEY:
 
 API_URL = "https://api.deepseek.com/v1/chat/completions"
 MODEL = "deepseek-v4-flash"
+_TRACE_CONTEXT = ContextVar("yangjian_llm_trace_context", default=None)
 
 # 代理设置
 PROXIES = {}
@@ -77,12 +79,20 @@ def call(system, messages, temperature=0.7, max_tokens=2000, agent_id: str = "")
                 return f"【LLM 调用失败: {e}】"
 
 
+def set_trace_context(context):
+    _TRACE_CONTEXT.set(context)
+
+
+def clear_trace_context():
+    _TRACE_CONTEXT.set(None)
+
+
 def _log_llm_call(agent_id: str, system: str, messages: list, result: str, duration_ms: float):
     if not agent_id:
         return
     try:
         from langfuse_logger import LangfuseCtx, log_generation
-        ctx = LangfuseCtx()
+        ctx = _TRACE_CONTEXT.get() or LangfuseCtx()
         log_generation(ctx, agent_id, system, messages, result, duration_ms)
     except Exception:
         pass

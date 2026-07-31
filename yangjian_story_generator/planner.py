@@ -21,13 +21,18 @@ from .models import (
 )
 from .validation import StoryPlanValidator
 
+PROJECT_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "YANGJIAN_PROJECT_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)))
+
 
 # ── 模型适配器（用 room 的 llm 模块） ────────────────────────
 
 
 def _call_llm(system: str, user: str, temperature: float = 0.7, max_tokens: int = 8000) -> str:
     """调用 room 的 llm 模块生成故事计划。"""
-    sys.path.insert(0, os.path.expanduser("/Users/xiaoxianhan/Documents/yangjian-room/room"))
+    sys.path.insert(0, os.path.join(PROJECT_DIR, "room"))
     import llm as room_llm
     return room_llm.call(
         system=system,
@@ -313,7 +318,7 @@ async def generate_story_plan_async(
 def save_story_plan(plan: StoryPlan, path: str | None = None) -> str:
     """保存私有故事计划到 JSON 文件。"""
     if path is None:
-        path = os.path.expanduser(f"/Users/xiaoxianhan/Documents/yangjian-room/contexts/story_plan_{plan.story_id}.json")
+        path = os.path.join(PROJECT_DIR, "contexts", f"story_plan_{plan.story_id}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(story_plan_to_json(plan))
@@ -322,7 +327,7 @@ def save_story_plan(plan: StoryPlan, path: str | None = None) -> str:
 
 def load_story_plan(story_id: str) -> StoryPlan | None:
     """从 JSON 文件加载故事计划。"""
-    path = os.path.expanduser(f"/Users/xiaoxianhan/Documents/yangjian-room/contexts/story_plan_{story_id}.json")
+    path = os.path.join(PROJECT_DIR, "contexts", f"story_plan_{story_id}.json")
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as f:

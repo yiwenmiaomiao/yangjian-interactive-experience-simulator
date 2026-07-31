@@ -44,9 +44,23 @@ class ActorAbstentionOutput(BaseModel):
     suggested_condition: str = ""
 
 
+class RelationshipFeedback(BaseModel):
+    """杨戬对用户的内心感受（仅在 checkpoint beat 输出）。
+
+    Yangjian decides based on his own feelings and persona.
+    Changes can be empty (no shift this turn).
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    changes: dict[str, int] = Field(default_factory=dict)
+    reason: str = ""
+
+
 class ActorTurnOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     result_type: Literal["proposal", "abstain"]
     proposal: ActorProposalOutput | None = None
     abstention: ActorAbstentionOutput | None = None
+    # Optional: only output when current beat has a relationship_checkpoint
+    relationship_feedback: RelationshipFeedback | None = None

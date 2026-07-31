@@ -98,7 +98,7 @@ def call_structured(
     system: str,
     messages: list[dict[str, str]],
     temperature: float = 0.7,
-    max_tokens: int = 2000,
+    max_tokens: int = 8000,
     max_retries: int = 2,
     target_pool: Sequence[str] | None = None,
 ) -> T:
@@ -120,6 +120,10 @@ def call_structured(
             response_format=response_format,
         )
         if raw.startswith("【"):
+            # Truncation (finish_reason=length) is not recoverable by retrying
+            # with the same max_tokens — raise immediately, no retry.
+            if "截断" in raw:
+                raise StructuredOutputError(raw)
             if attempt >= max_retries:
                 raise StructuredOutputError(raw)
             attempt_messages = attempt_messages + [

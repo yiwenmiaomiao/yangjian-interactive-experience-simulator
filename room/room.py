@@ -229,7 +229,7 @@ ID: {current_beat_id}
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
         temperature=0.7,
-        max_tokens=2000,
+        max_tokens=4000,
     )
     
     # 解析
@@ -887,6 +887,26 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                         perception_text = state_manager.get_perception(
                             "yangjian", state, ""
                         )
+                        # Inject relationship summary so yangjian knows
+                        # how he feels about the user.
+                        try:
+                            import relationship as rel_mod
+                            rel_summary = rel_mod.get_summary_for_yangjian()
+                            if rel_summary:
+                                perception_text = (
+                                    perception_text + "\n\n" + rel_summary
+                                ) if perception_text.strip() else rel_summary
+                        except Exception:
+                            pass
+                        # Inject checkpoint description if this beat has one
+                        checkpoint = bi.get("relationship_checkpoint")
+                        if checkpoint:
+                            perception_text += (
+                                "\n\n## 本回合关系评估点\n"
+                                f"{checkpoint.get('description', '')}\n"
+                                "请在 relationship_feedback 中输出你对用户本回合行为的感受变化"
+                                "（没有变化也填，changes 留空即可）"
+                            )
                         perception = tuple(
                             (
                                 contracts.FactRef(
@@ -921,6 +941,31 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                         result = contracts.to_dict(
                             yangjian.handle_message(actor_request).payload
                         )
+                        # Process relationship feedback from yangjian
+                        # (only present on checkpoint beats)
+                        feedback = result.get("relationship_feedback")
+                        if isinstance(feedback, dict):
+                            changes = feedback.get("changes", {})
+                            reason = str(feedback.get("reason", ""))
+                            if changes and isinstance(changes, dict):
+                                try:
+                                    import relationship as rel_mod
+                                    rel_mod.apply_delta(
+                                        changes,
+                                        beat_id=str(bi.get("current_beat_id", "")),
+                                        reason=reason,
+                                    )
+                                    log_event(
+                                        lf_ctx,
+                                        "room.relationship_update",
+                                        output_data={
+                                            "changes": changes,
+                                            "reason": reason[:200],
+                                            "beat_id": bi.get("current_beat_id"),
+                                        },
+                                    )
+                                except Exception:
+                                    pass
                     else:
                         turn_input = npc.build_structured_turn_input(
                             target,
@@ -1164,6 +1209,29 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             )
 
     narration_spec = _select_narration_spec(directive, resolution)
+
+    # 场景变化强制旁白：用户执行物理行动（进入新地点、触碰物体等）时，
+    # 即使导演没设 narration.required，也必须触发旁白描述新环境。
+    # 旁白是用户的眼睛。
+    if narration_spec is None:
+        user_turn = directive.get("user_turn") or {}
+        if user_turn.get("kind") == "physical_action":
+            narration_spec = {
+                "purpose": "scene_opening",
+                "timing": "before_dialogue",
+                "visible_fact_ids": list(bi.get("allowed_information", [])),
+                "max_characters": 150,
+                "style_profile": "concise",
+                "brief": "用户执行了物理行动，描述用户此刻看到的新环境",
+                "scene_facts": [],
+            }
+            log_event(
+                lf_ctx,
+                "room.narration_forced_physical_action",
+                output_data={"user_turn_kind": "physical_action"},
+                level="WARNING",
+            )
+
     if narration_spec:
         with room_phase(
             lf_ctx,
@@ -1255,6 +1323,26 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             output_data={"confirmed_event_count": len(confirmed_events)},
         )
 
+    # ── 钩子兜底：仅在异常情况下触发 ──
+    # 正常流程中钩子由导演在 DIRECT 阶段安排，代码不干预。
+    # 仅当导演走了 fallback 或所有 actor abstain 且无 narration 时，补一条环境线索。
+    director_fell_back = bool(directive.get("_is_fallback"))
+    all_abstained = bool(actor_results) and all(
+        r.get("kind") == "abstain" for r in actor_results
+    )
+    if outputs and (director_fell_back or (all_abstained and narration_spec is None)):
+        hook_text = _generate_hook_narration(bi, outputs, lf_ctx)
+        if hook_text:
+            outputs.append({"role": "旁白", "text": hook_text, "kind": "narration"})
+            log_event(
+                lf_ctx,
+                "room.hook_fallback",
+                output_data={
+                    "reason": "fallback_directive" if director_fell_back else "all_abstained",
+                    "hook_text": hook_text[:200],
+                },
+            )
+
     order = [output["role"] for output in outputs] + ["用户"]
 
     # Phase 4: Room 保存 + 事实管理
@@ -1310,6 +1398,53 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
     unlocked_next_beats = {
         item.get("target_id") for item in bi.get("available_transitions", [])
     }
+    if next_beat and next_beat in unlocked_next_beats:
+        # Check relationship requirements for the target beat
+        transition_info = None
+        for t in bi.get("available_transitions", []):
+            if t.get("target_id") == next_beat:
+                transition_info = t
+                break
+        reqs = transition_info.get("relationship_requirements") if transition_info else None
+        reqs_met = True
+        if reqs:
+            try:
+                import relationship as rel_mod
+                reqs_met = rel_mod.check_requirements(reqs)
+            except Exception:
+                pass
+            if not reqs_met:
+                # Relationship doesn't meet requirements for this transition.
+                # Try to find an alternative unlocked transition.
+                alt_beats = [
+                    t.get("target_id")
+                    for t in bi.get("available_transitions", [])
+                    if t.get("target_id") != next_beat
+                ]
+                if alt_beats:
+                    next_beat = alt_beats[0]
+                    log_event(
+                        lf_ctx,
+                        "room.relationship_gate_redirect",
+                        output_data={
+                            "original_target": resolution.get("next_beat"),
+                            "redirected_to": next_beat,
+                            "requirements": reqs,
+                        },
+                        level="WARNING",
+                    )
+                else:
+                    # No alternative; stay on current beat
+                    next_beat = None
+                    log_event(
+                        lf_ctx,
+                        "room.relationship_gate_blocked",
+                        output_data={
+                            "blocked_target": resolution.get("next_beat"),
+                            "requirements": reqs,
+                        },
+                        level="WARNING",
+                    )
     if next_beat and next_beat in unlocked_next_beats:
         ss.advance_beat(ss_state, next_beat)
         # 更新 director 缓存
@@ -1535,6 +1670,74 @@ def _select_narration_spec(
     return None
 
 
+def _generate_hook_narration(
+    bi: dict[str, Any],
+    outputs: list[dict[str, Any]],
+    lf_ctx,
+) -> str:
+    """异常兜底：当导演 fallback 或所有 actor abstain 时，生成一条环境线索作为钩子。
+
+    基于当前 beat 的推进方向和允许透露的信息，调用旁白 LLM 生成一句环境变化描述。
+    正常流程不调用此函数。
+    """
+    import llm as room_llm
+
+    transitions = bi.get("available_transitions", [])
+    allowed_info = bi.get("allowed_information", [])
+    beat_purpose = bi.get("beat_purpose", "")
+    beat_id = bi.get("current_beat_id", "")
+
+    # 构造推进方向描述
+    if transitions:
+        hint_parts = []
+        for t in transitions:
+            target = t.get("target_id", "")
+            consequences = t.get("preserved_consequences", [])
+            if consequences:
+                hint_parts.append(f"向「{target}」推进：{', '.join(consequences)}")
+            else:
+                hint_parts.append(f"向「{target}」推进")
+        hints = "; ".join(hint_parts)
+    else:
+        hints = "保持当前局面开放"
+
+    # 已有输出摘要（避免重复）
+    existing = " | ".join(
+        f"{o.get('role', '')}: {str(o.get('text', ''))[:80]}"
+        for o in outputs[-3:]
+    )
+
+    system = (
+        "你是杨戬项目的旁白。现在需要一个环境线索作为钩子，让用户知道接下来可以关注什么。"
+        "只描述环境变化或新出现的线索，不替任何角色说话或行动。"
+        "用第二人称\"你\"视角。一到两句话，不超过80字。"
+        "不要使用比喻、明喻或诗化意象。"
+    )
+    prompt = (
+        f"当前 Beat：{beat_id}\n"
+        f"Beat 目的：{beat_purpose[:200]}\n"
+        f"推进方向：{hints}\n"
+        f"可透露的信息：{', '.join(allowed_info)}\n"
+        f"已有输出（不要重复）：{existing[:300]}\n\n"
+        f"请写一句环境变化或线索提示，给用户一个可以继续参与的入口。"
+    )
+
+    try:
+        raw = room_llm.call(
+            agent_id="narrator.hook",
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=800,
+        )
+        text = str(raw or "").strip()
+        if not text or text in ("", '""', "''", "（空）", "(空)"):
+            return ""
+        return text[:100]
+    except Exception:
+        return ""
+
+
 def _apply_actor_resolution(
     actor_results: list[dict[str, Any]],
     resolution: dict[str, Any],
@@ -1569,8 +1772,17 @@ def _apply_actor_resolution(
                 or proposal.get("action")
             )
         else:
-            dialogue = decision.get("final_dialogue", proposal.get("dialogue"))
-            action = decision.get("final_action", proposal.get("action"))
+            # accept: prefer director-confirmed text; fall back to actor proposal.
+            # Must use `or` not dict.get(default) because the key may exist
+            # with value null (LLM outputs "final_dialogue": null).
+            dialogue = (
+                decision.get("final_dialogue")
+                or proposal.get("dialogue")
+            )
+            action = (
+                decision.get("final_action")
+                or proposal.get("action")
+            )
         agent_id = str(actor_result.get("agent_id", ""))
         role = display_agent_name(agent_id) or agent_id
         outcome = str(decision.get("outcome_summary", "")).strip()

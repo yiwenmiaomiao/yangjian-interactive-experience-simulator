@@ -16,6 +16,7 @@ from .models import (
     NarrativeFunction,
     NPCProfileSpec,
     NPCRequirement,
+    RelationshipCheckpoint,
     Secret,
     SideArc,
     StoryBeat,
@@ -105,10 +106,18 @@ def _transition(data: Mapping[str, Any]) -> BranchTransition:
         target_id=str(data["target_id"]),
         conditions=tuple(_condition(item) for item in data.get("conditions", ())),
         preserved_consequences=tuple(data.get("preserved_consequences", ())),
+        relationship_requirements=data.get("relationship_requirements"),
     )
 
 
 def _beat(data: Mapping[str, Any]) -> StoryBeat:
+    checkpoint_data = data.get("relationship_checkpoint")
+    checkpoint = None
+    if isinstance(checkpoint_data, Mapping) and checkpoint_data.get("description"):
+        checkpoint = RelationshipCheckpoint(
+            description=str(checkpoint_data["description"]),
+            evaluator=str(checkpoint_data.get("evaluator", "yangjian")),
+        )
     return StoryBeat(
         beat_id=str(data["beat_id"]),
         purpose=str(data["purpose"]),
@@ -121,6 +130,7 @@ def _beat(data: Mapping[str, Any]) -> StoryBeat:
         forbidden_reveals=tuple(data.get("forbidden_reveals", ())),
         npc_requirement_ids=tuple(data.get("npc_requirement_ids", ())),
         reconverges_at=data.get("reconverges_at"),
+        relationship_checkpoint=checkpoint,
     )
 
 

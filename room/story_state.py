@@ -69,6 +69,14 @@ def default_state() -> dict[str, Any]:
         "in_recovery": False,
         "recovery_arc_id": None,
         "recovery_rejoin_target": None,
+        # 杨戬对用户的关系状态
+        "relationship": {
+            "trust": 1,
+            "respect": 0,
+            "closeness": 1,
+            "wariness": 1,
+            "history": [],
+        },
     }
 
 
@@ -157,6 +165,7 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
             "transition_id": t.transition_id,
             "target_id": t.target_id,
             "preserved_consequences": list(t.preserved_consequences),
+            "relationship_requirements": getattr(t, "relationship_requirements", None),
         }
         for t in beat.transitions
     ]
@@ -185,6 +194,7 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
         "flags": dict(state.get("flags", {})),
         "consequences": list(state.get("selected_branch_consequences", [])),
         "beat_tick_counter": state.get("beat_tick_counter", 0),
+        "relationship_checkpoint": getattr(beat, "relationship_checkpoint", None),
     }
 
 

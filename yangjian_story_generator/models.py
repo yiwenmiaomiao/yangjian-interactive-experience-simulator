@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 JSONScalar: TypeAlias = str | int | float | bool | None
 JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
@@ -126,11 +126,28 @@ class Condition:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RelationshipCheckpoint:
+    """Marks a beat as a relationship evaluation point.
+
+    The description tells yangjian what this checkpoint is about
+    (not what to score or how). Yangjian decides based on his own feelings.
+    """
+    description: str
+    evaluator: str = "yangjian"
+
+    def __post_init__(self) -> None:
+        _require_text(self.description, "checkpoint description")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class BranchTransition:
     transition_id: str
     target_id: str
     conditions: tuple[Condition, ...] = ()
     preserved_consequences: tuple[str, ...] = ()
+    # Optional relationship requirements for this transition.
+    # e.g. {"trust": {"min": 2}, "closeness": {"min": 1}}
+    relationship_requirements: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.transition_id, "transition_id")
@@ -236,6 +253,9 @@ class StoryBeat:
     forbidden_reveals: tuple[str, ...] = ()
     npc_requirement_ids: tuple[str, ...] = ()
     reconverges_at: str | None = None
+    # Optional: marks this beat as a relationship evaluation point.
+    # When present, yangjian outputs relationship_feedback after his turn.
+    relationship_checkpoint: RelationshipCheckpoint | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.beat_id, "beat_id")

@@ -116,6 +116,7 @@ SYSTEM_PROMPT = """你是杨戬 Room 的导演。
 - visible_facts 只能填 allowed_information 中的 fact_id；场景描写写在 purpose 文本中
 - 用户正在与杨戬连续对话时通常 required=false
 - Narrator 不属于 Actor Pool，不要给旁白创建 task
+- 当场景发生变化（进入新地点、环境突变、发现新事物）时，narration.required 必须为 true，旁白是用户的眼睛，必须描述用户看到的新环境
 
 ## user_turn 规则
 先分类用户本回合输入，再派任务：
@@ -135,6 +136,20 @@ SYSTEM_PROMPT = """你是杨戬 Room 的导演。
 - state_operations：静默状态更新（分支选择、计数等），不触发旁白
 - user_feedback：确定性环境反馈；disclosure.required=true 时必须提供
 - required=true 时 inline_effects 必须为空（state_operations=[]，user_feedback=null）
+
+## 钩子规则（每回合必须遵守）
+每回合的输出组合必须包含至少一个未闭合的入口，让用户知道"接下来可以做什么"。
+钩子来源有优先级，优先用旁白和 NPC，杨戬只在必要时才作为钩子来源：
+
+钩子来源优先级：
+1. 旁白（最优先）：环境发生变化（远处传来声音、光线突然变化、新物体出现、天气骤变）
+2. NPC（次优先）：NPC打断、带来新信息、做出意外举动
+3. 杨戬（末选）：只在旁白和NPC都不适合本回合时，才由杨戬留钩子——且必须符合他高傲寡言的人设（一个意味深长的动作、一句点到为止的话），不要让他主动追问或讨好用户
+
+杨戬是高傲寡言的角色，多数回合他说完该说的话就完了，不需要他负责"留钩子"。
+不要让一个回合的输出以完全闭合的状态结尾。
+如果本回合 actor_tasks 的结果不足以构成钩子，应在 narration_request 中安排一个环境变化或线索提示。
+参考"可引导方向"字段，通过角色行为或环境变化自然引导用户接近推进条件，不要直接告诉用户"你需要做X"。
 """
 
 # ── 故事计划上下文注入 ──────────────────────────────────
@@ -150,6 +165,7 @@ Beat 目的：{beat_purpose}
 禁止透露的信息：{forbidden_reveals}
 
 可用分支目标：{transitions}
+可引导方向（不要直接告诉用户，通过角色行为或环境变化创造让用户自然接近的机会）：{advance_hints}
 {side_arcs_section}
 可调度 Actor ID（tasks.target 必须从这里原样复制）：{available_actor_ids}
 Actor 显示名对照（仅供理解，禁止写入 target）：{actor_display_map}
@@ -157,6 +173,7 @@ Actor 显示名对照（仅供理解，禁止写入 target）：{actor_display_m
 已有故事事实：{consequences}
 连续偏离次数：{deviation_count}
 {recovery_note}
+当前杨戬与用户关系：{relationship_summary}
 
 --- 用户消息 ---
 {user_message_display}
@@ -283,7 +300,7 @@ def _decide_traditional(state, user_message=None) -> dict[str, Any]:
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": situation}],
         temperature=0.7,
-        max_tokens=2000,
+        max_tokens=8000,
     )
     directive = _parse_directive(raw)
     if "error" not in directive:
@@ -292,6 +309,15 @@ def _decide_traditional(state, user_message=None) -> dict[str, Any]:
 
 
 # ── 故事计划模式 ─────────────────────────────────────────
+
+
+def _get_relationship_summary() -> str:
+    """Compact relationship summary for director context (read-only)."""
+    try:
+        import relationship as rel_mod
+        return rel_mod.get_summary_for_director()
+    except Exception:
+        return "未知"
 
 
 def _decide_story(state, user_message=None) -> dict[str, Any]:
@@ -304,6 +330,21 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
     side_text = f"可进入副线: {side_arcs_list}" if side_arcs_list else "无"
     trans_text = ", ".join(f"{t['transition_id']}->{t['target_id']}" for t in bi.get("available_transitions", []))
 
+    # 构造推进方向自然语言提示
+    transitions = bi.get("available_transitions", [])
+    if transitions:
+        hint_parts = []
+        for t in transitions:
+            target = t.get("target_id", "")
+            consequences = t.get("preserved_consequences", [])
+            if consequences:
+                hint_parts.append(f"向「{target}」推进——{', '.join(consequences)}")
+            else:
+                hint_parts.append(f"向「{target}」推进")
+        advance_hints = "; ".join(hint_parts)
+    else:
+        advance_hints = "当前 beat 无明确推进方向，保持开放"
+
     user_msg_display = f"用户说：{user_message}" if user_message else "（无用户输入，系统推动）"
     available_ids = build_available_actor_pool(bi)
     display_map = actor_display_map(available_ids) or "yangjian=杨戬"
@@ -315,6 +356,7 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
         allowed_info=", ".join(bi.get("allowed_information", [])),
         forbidden_reveals=", ".join(bi.get("forbidden_reveals", [])),
         transitions=trans_text,
+        advance_hints=advance_hints,
         side_arcs_section=side_text,
         available_actor_ids=", ".join(available_ids),
         actor_display_map=display_map,
@@ -324,6 +366,7 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
         consequences=", ".join(bi.get("consequences", [])),
         deviation_count=bi.get("beat_tick_counter", 0),
         recovery_note="",
+        relationship_summary=_get_relationship_summary(),
         user_message_display=user_msg_display,
     )
 
@@ -347,7 +390,7 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
                     system=SYSTEM_PROMPT,
                     messages=attempt_messages,
                     temperature=0.7,
-                    max_tokens=2000,
+                    max_tokens=8000,
                     target_pool=available_ids,
                 )
             except StructuredOutputError as exc:
@@ -472,7 +515,7 @@ def _resolve_story(
                 system=resolve_prompt,
                 messages=[{"role": "user", "content": situation}],
                 temperature=0.5,
-                max_tokens=1500,
+                max_tokens=8000,
             )
         except StructuredOutputError:
             continue
@@ -1182,6 +1225,7 @@ def _fallback_directive() -> dict[str, Any]:
     runtime = _canonical_directive_to_runtime(canonical, bi)
     runtime["current_story_id"] = bi.get("story_id", "story_1")
     runtime["current_beat"] = beat_id
+    runtime["_is_fallback"] = True
     return runtime
 
 

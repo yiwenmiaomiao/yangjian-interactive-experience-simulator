@@ -121,7 +121,7 @@ def act_turn(turn_input: contracts.YangJianTurnInput) -> dict:
                 "content": _build_turn_prompt(turn_input),
             }],
             temperature=0.6,
-            max_tokens=1500,
+            max_tokens=4000,
         )
     except StructuredOutputError:
         data = ActorTurnOutput(
@@ -294,7 +294,7 @@ def act(director_decision, perception):
         system=SYSTEM_PROMPT_HEAD,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.6,
-        max_tokens=1500,
+        max_tokens=4000,
     )
     
     return _parse_output(raw)

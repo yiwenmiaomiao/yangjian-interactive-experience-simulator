@@ -43,8 +43,6 @@ class AgentSchemaTests(unittest.TestCase):
 
     def test_directive_output_accepts_minimal_valid_payload(self) -> None:
         payload = DirectorDirectiveOutput(
-            chapter="story_1",
-            beat="m1",
             observed_user_intent=ObservedUserIntentOutput(
                 intent="continue",
                 confidence=0.5,
@@ -71,7 +69,9 @@ class AgentSchemaTests(unittest.TestCase):
                 max_characters=0,
             ),
         )
-        self.assertEqual("DIRECT", payload.mode)
+        # mode/chapter/beat were removed from LLM output schema;
+        # Room fills them from beat_info. Just verify the model validates.
+        self.assertEqual("maintain", payload.desired_progress)
 
     def test_narration_output_allows_empty_text(self) -> None:
         self.assertEqual("", NarrationOutput().text)

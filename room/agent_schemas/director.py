@@ -8,16 +8,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agent_ids import coerce_target_in_pool, normalize_agent_id
 
+# Shared config: ignore extra fields so LLM can include redundant keys
+# (mode/chapter/beat etc.) without failing validation. Room overrides them.
+_CFG = ConfigDict(extra="ignore")
+
 
 class ObservedUserIntentOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     intent: str = Field(min_length=1)
     confidence: float = Field(ge=0.0, le=1.0)
 
 
 class UserTurnDisclosureOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     required: bool
     mode: Literal[
@@ -29,7 +33,7 @@ class UserTurnDisclosureOutput(BaseModel):
 
 
 class UserTurnOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     kind: Literal[
         "dialogue",
@@ -48,7 +52,7 @@ class UserTurnOutput(BaseModel):
 
 
 class ResolveGateOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     required: bool
     reason: str = Field(min_length=1)
@@ -56,7 +60,7 @@ class ResolveGateOutput(BaseModel):
 
 
 class StateOperationOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     key: str = Field(min_length=1)
     value: Any
@@ -64,7 +68,7 @@ class StateOperationOutput(BaseModel):
 
 
 class PresentationOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     required: bool
     purpose: str
@@ -72,7 +76,7 @@ class PresentationOutput(BaseModel):
 
 
 class UserFeedbackOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     outcome_summary: str
     revealed_fact_ids: list[str] = Field(default_factory=list)
@@ -80,24 +84,22 @@ class UserFeedbackOutput(BaseModel):
 
 
 class InlineEffectsOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     state_operations: list[StateOperationOutput] = Field(default_factory=list)
     user_feedback: UserFeedbackOutput | None = None
 
 
 class DirectorTaskOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     task_id: str = Field(min_length=1)
     target: str = Field(
         min_length=1,
         description="Canonical English agent_id (yangjian), never display name",
     )
-    source_reference: str = Field(min_length=1)
     objective: str = Field(min_length=1)
     information_ids: list[str] = Field(default_factory=list)
-    success_condition: str = Field(min_length=1)
 
     @field_validator("target", mode="before")
     @classmethod
@@ -108,7 +110,7 @@ class DirectorTaskOutput(BaseModel):
 
 
 class DirectorNarrationOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     required: bool
     purpose: str
@@ -120,7 +122,7 @@ class DirectorNarrationOutput(BaseModel):
 
 
 class NPCCommandOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     command_id: str = Field(min_length=1)
     operation: Literal[
@@ -148,25 +150,30 @@ class NPCCommandOutput(BaseModel):
 
 
 class DirectorDirectiveOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """LLM output for DIRECT phase.
 
-    mode: Literal["DIRECT"] = "DIRECT"
-    chapter: str = Field(min_length=1)
-    beat: str = Field(min_length=1)
+    Removed redundant fields the LLM no longer needs to generate:
+    - mode/chapter/beat: Room always overrides from beat_info
+    - selected_side_arc: never used in practice
+    - fallback_world_event: never consumed by room.py
+    - source_reference: Room always sets to beat_id
+    - success_condition: has default, Room doesn't depend on LLM value
+    """
+
+    model_config = _CFG
+
     observed_user_intent: ObservedUserIntentOutput
     user_turn: UserTurnOutput
     resolve_gate: ResolveGateOutput
     inline_effects: InlineEffectsOutput
     tasks: list[DirectorTaskOutput] = Field(default_factory=list)
-    desired_progress: Literal["maintain", "advance", "recover"]
-    selected_side_arc: str | None = None
+    desired_progress: Literal["maintain", "advance", "recover"] = "maintain"
     narration: DirectorNarrationOutput
     npc_commands: list[NPCCommandOutput] = Field(default_factory=list)
-    fallback_world_event: dict[str, Any] | None = None
 
 
 class UserOutcomeOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     applies: bool
     result: Literal[
@@ -181,7 +188,7 @@ class UserOutcomeOutput(BaseModel):
 
 
 class ResolutionDecisionOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     proposal_id: str = Field(min_length=1)
     result: Literal[
@@ -198,7 +205,7 @@ class ResolutionDecisionOutput(BaseModel):
 
 
 class ContinuationOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = _CFG
 
     kind: Literal[
         "continue_current",
@@ -212,11 +219,13 @@ class ContinuationOutput(BaseModel):
 
 
 class DirectorResolutionOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """LLM output for RESOLVE phase.
 
-    mode: Literal["RESOLVE"] = "RESOLVE"
-    chapter: str = Field(min_length=1)
-    beat: str = Field(min_length=1)
+    Removed redundant fields (mode/chapter/beat) that Room always overrides.
+    """
+
+    model_config = _CFG
+
     decisions: list[ResolutionDecisionOutput] = Field(default_factory=list)
     user_outcome: UserOutcomeOutput
     state_changes: list[StateOperationOutput] = Field(default_factory=list)

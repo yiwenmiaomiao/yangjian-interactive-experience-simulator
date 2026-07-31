@@ -68,7 +68,7 @@ def call(
     system,
     messages,
     temperature=0.7,
-    max_tokens=2000,
+    max_tokens=8000,
     agent_id: str = "",
     response_format=None,
 ):
@@ -151,6 +151,11 @@ def call(
                     f"choice={json.dumps(choice, ensure_ascii=False)[:500]}",
                     flush=True,
                 )
+            # finish_reason=length means the output was truncated by max_tokens.
+            # Returning truncated text as-is causes cascading parse failures and
+            # pointless retries with the same max_tokens. Surface it as an error.
+            if meta.get("finish_reason") == "length":
+                result = f"【LLM 输出被截断: finish_reason=length, max_tokens={max_tokens}】"
             _log_llm_call(
                 agent_id,
                 system,

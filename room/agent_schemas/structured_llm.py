@@ -26,16 +26,27 @@ def extract_json_text(raw: str) -> str:
     return text.strip()
 
 
-def _response_format_for_model(model: type[BaseModel]) -> dict:
+def schema_to_json_object_format(model: type[BaseModel]) -> tuple[dict, str]:
+    """Convert a Pydantic model into DeepSeek-compatible response_format + hint.
+
+    DeepSeek ``deepseek-v4-flash`` rejects ``response_format.type=json_schema``.
+    We keep ``{"type": "json_object"}`` on the wire and put the JSON Schema into
+    the prompt so the model still targets the right shape; Pydantic validates.
+    """
     schema = model.model_json_schema()
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": model.__name__,
-            "schema": schema,
-            "strict": False,
-        },
-    }
+    response_format = {"type": "json_object"}
+    hint = (
+        "你必须只输出一个 JSON 对象（不要 markdown 代码块，不要额外说明），"
+        f"并尽量符合以下 JSON Schema（模型名 {model.__name__}）：\n"
+        + json.dumps(schema, ensure_ascii=False)
+    )
+    return response_format, hint
+
+
+def _response_format_for_model(model: type[BaseModel]) -> dict:
+    """Deprecated alias — always returns json_object for DeepSeek."""
+    response_format, _ = schema_to_json_object_format(model)
+    return response_format
 
 
 def call_structured(
@@ -49,19 +60,15 @@ def call_structured(
     max_retries: int = 2,
 ) -> T:
     """Call the LLM and validate the response with a Pydantic output model."""
+    response_format, schema_hint = schema_to_json_object_format(model)
+    system_with_schema = f"{system.rstrip()}\n\n{schema_hint}"
     attempt_messages = list(messages)
     last_error: ValidationError | None = None
-    use_schema = True
 
     for attempt in range(max_retries + 1):
-        response_format = (
-            _response_format_for_model(model)
-            if use_schema
-            else {"type": "json_object"}
-        )
         raw = llm.call(
             agent_id=agent_id,
-            system=system,
+            system=system_with_schema,
             messages=attempt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -73,7 +80,7 @@ def call_structured(
             attempt_messages = attempt_messages + [
                 {
                     "role": "user",
-                    "content": "上一次调用失败，请重新输出符合要求的 JSON。",
+                    "content": "上一次调用失败，请重新输出符合要求的 JSON 对象。",
                 }
             ]
             continue
@@ -82,9 +89,6 @@ def call_structured(
             return model.model_validate_json(extract_json_text(raw))
         except ValidationError as exc:
             last_error = exc
-            if use_schema:
-                use_schema = False
-                continue
             if attempt >= max_retries:
                 break
             attempt_messages = attempt_messages + [
@@ -92,7 +96,7 @@ def call_structured(
                 {
                     "role": "user",
                     "content": (
-                        "输出未通过结构校验，请只返回 JSON。"
+                        "输出未通过结构校验，请只返回一个 JSON 对象。"
                         f" 问题：{json.dumps(exc.errors()[:5], ensure_ascii=False)}"
                     ),
                 },

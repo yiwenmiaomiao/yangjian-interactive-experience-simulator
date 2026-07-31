@@ -221,6 +221,48 @@ def handle_resolve(
         str(message.payload.user_event.get("text", "")) or None,
         dict(message.payload.user_turn),
     )
+    if not isinstance(raw, dict) or raw.get("error") or "continuation" not in raw:
+        # decide_resolve can return {"error": ...}; never let Room crash here.
+        raw = {
+            "mode": "RESOLVE",
+            "resolution_id": "resolution_fallback",
+            "decisions": [
+                {
+                    "result_id": item.get("result_id", ""),
+                    "result": (
+                        "accept_abstention"
+                        if item.get("kind") == "abstain"
+                        else "reject"
+                    ),
+                    "outcome_summary": "RESOLVE 失败，采用确定性继续策略",
+                }
+                for item in raw_results
+            ],
+            "state_operations": [],
+            "state_changes": [],
+            "next_beat": None,
+            "user_outcome": {
+                "applies": False,
+                "result": "not_applicable",
+                "outcome_summary": "",
+                "revealed_fact_ids": [],
+                "presentation": {
+                    "required": False,
+                    "purpose": "none",
+                    "timing": "after_dialogue",
+                },
+            },
+            "continuation": {
+                "kind": "continue_current",
+                "reason": str(
+                    (raw or {}).get("error", "resolve_failed")
+                    if isinstance(raw, dict)
+                    else "resolve_failed"
+                ),
+                "target_id": None,
+                "world_event": None,
+            },
+        }
     payload = contracts.director_resolution_from_dict(raw)
     return contracts.new_message(
         turn_id=message.turn_id,
@@ -300,6 +342,7 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
         f"第{state.get('world_day', 1)}天"
     )
 
+    last_fail = "no_attempt"
     for attempt in range(3):
         try:
             parsed = call_structured(
@@ -310,22 +353,36 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
                 temperature=0.7,
                 max_tokens=2000,
             )
-        except StructuredOutputError:
+        except StructuredOutputError as exc:
+            last_fail = f"structured_error:{exc}"
             continue
         canonical = _coerce_canonical_directive(parsed.model_dump(), bi)
         if "error" not in canonical:
             canonical = _enrich_canonical_directive(canonical, bi)
             canonical = _sanitize_canonical_directive(canonical, bi)
-            if validate_directive(
+            validation = validate_directive(
                 canonical, _build_director_context(bi)
-            ).is_valid:
+            )
+            if validation.is_valid:
                 runtime = _canonical_directive_to_runtime(canonical, bi)
                 runtime["current_story_id"] = bi.get("story_id", "story_1")
                 runtime["current_beat"] = bi.get("current_beat_id", "")
                 return runtime
+            last_fail = (
+                "guard_invalid:"
+                + ";".join(
+                    f"{i.location}:{i.message}" for i in validation.issues[:5]
+                )
+            )
+        else:
+            last_fail = f"coerce_error:{canonical.get('error')}"
         if attempt < 2:
             continue
 
+    print(
+        f"[director] DIRECT fallback_full_path after retries: {last_fail}",
+        flush=True,
+    )
     return _fallback_directive()
 
 

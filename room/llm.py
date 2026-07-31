@@ -21,6 +21,10 @@ API_URL = "https://api.deepseek.com/v1/chat/completions"
 MODEL = "deepseek-v4-flash"
 _TRACE_CONTEXT = ContextVar("yangjian_llm_trace_context", default=None)
 
+# DeepSeek deepseek-v4-flash rejects response_format.type=json_schema.
+# Convert to json_object; callers still validate with Pydantic.
+_JSON_SCHEMA_UNSUPPORTED = True
+
 # 代理设置
 PROXIES = {}
 http_proxy = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
@@ -30,6 +34,34 @@ if http_proxy:
     PROXIES["http"] = http_proxy
 if https_proxy:
     PROXIES["https"] = https_proxy
+
+
+def normalize_response_format(response_format):
+    """Map provider-unsupported formats onto what DeepSeek accepts.
+
+    ``json_schema`` → ``json_object`` (schema enforcement stays in Pydantic).
+    """
+    if not response_format or not isinstance(response_format, dict):
+        return response_format
+    fmt_type = response_format.get("type")
+    if fmt_type == "json_schema" and _JSON_SCHEMA_UNSUPPORTED:
+        return {"type": "json_object"}
+    if fmt_type == "json_object":
+        return {"type": "json_object"}
+    return response_format
+
+
+def _is_unsupported_response_format_error(exc: BaseException, body: str = "") -> bool:
+    text = f"{exc} {body}".lower()
+    return (
+        "response_format" in text
+        and (
+            "unavailable" in text
+            or "json_schema" in text
+            or "not support" in text
+            or "unsupported" in text
+        )
+    )
 
 
 def call(
@@ -44,7 +76,8 @@ def call(
 
     Args:
         agent_id: 用于 Langfuse 日志的 agent 名称
-        response_format: 可选 JSON 模式，例如 {"type": "json_object"}
+        response_format: 可选 JSON 模式。``json_schema`` is auto-converted
+            to ``json_object`` for DeepSeek compatibility.
     """
     if not API_KEY:
         return "【错误：DEEPSEEK_API_KEY 未设置】"
@@ -58,8 +91,9 @@ def call(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
-    if response_format is not None:
-        payload["response_format"] = response_format
+    normalized = normalize_response_format(response_format)
+    if normalized is not None:
+        payload["response_format"] = normalized
 
     headers = {
         "Authorization": f"Bearer {API_KEY}",
@@ -76,6 +110,19 @@ def call(
                 proxies=PROXIES if PROXIES else None,
                 timeout=60,
             )
+            if resp.status_code == 400:
+                body = resp.text or ""
+                # Late conversion if provider rejects a format we still sent.
+                current = payload.get("response_format") or {}
+                if (
+                    _is_unsupported_response_format_error(
+                        RuntimeError(body), body
+                    )
+                    and current.get("type") != "json_object"
+                ):
+                    payload["response_format"] = {"type": "json_object"}
+                    continue
+                resp.raise_for_status()
             resp.raise_for_status()
             data = resp.json()
             result = data["choices"][0]["message"]["content"]
@@ -106,4 +153,3 @@ def _log_llm_call(agent_id: str, system: str, messages: list, result: str, durat
         log_generation(ctx, agent_id, system, messages, result, duration_ms)
     except Exception:
         pass
-

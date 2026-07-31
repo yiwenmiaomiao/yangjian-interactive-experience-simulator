@@ -31,6 +31,8 @@ from langfuse_logger import (
     log_event,
     log_state_change,
     room_phase,
+    start_room_trace,
+    end_room_trace,
 )
 if __package__:
     from . import (
@@ -59,41 +61,30 @@ def _serialized_tick(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
         with _TICK_LOCK:
-            lock_path = os.path.join(PROFILE_DIR, ".room_tick.lock")
-            try:
-                import time as _time
-                wait_started = _time.monotonic()
-                with runtime_context.process_lock(lock_path):
-                    waited = _time.monotonic() - wait_started
-                    if waited > 0.2:
-                        try:
-                            log_event(
-                                LangfuseCtx(source="lock"),
-                                "room.lock_waited",
-                                output_data={"waited_s": round(waited, 3)},
-                                level="WARNING",
-                            )
-                        except Exception:
-                            pass
-                    return function(*args, **kwargs)
-            except TimeoutError as exc:
-                try:
-                    log_error(
-                        LangfuseCtx(source="lock"),
-                        "room.lock_timeout",
-                        exc,
-                    )
-                except Exception:
-                    pass
-                return {
-                    "ok": False,
-                    "error": "room_lock_timeout",
-                    "output": [{
-                        "role": "系统",
-                        "text": "【Room 忙碌超时，请稍后重试】",
-                    }],
-                }
+            return function(*args, **kwargs)
     return wrapped
+
+
+def _acquire_room_process_lock(lf_ctx: LangfuseCtx):
+    """Process lock after the main Room trace is open so lock spans nest."""
+    import time as _time
+
+    lock_path = os.path.join(PROFILE_DIR, ".room_tick.lock")
+    wait_started = _time.monotonic()
+    cm = runtime_context.process_lock(lock_path)
+    cm.__enter__()
+    waited = _time.monotonic() - wait_started
+    if waited > 0.2:
+        try:
+            log_event(
+                lf_ctx,
+                "room.lock_waited",
+                output_data={"waited_s": round(waited, 3)},
+                level="WARNING",
+            )
+        except Exception:
+            pass
+    return cm
 
 
 # ── 故事计划管理 ──────────────────────────────────────────
@@ -298,6 +289,7 @@ def tick(
     *,
     user_id: str = "default",
     thread_id: str = "default",
+    job_name: str | None = None,
 ):
     """
     执行一个 Room Tick。
@@ -305,20 +297,60 @@ def tick(
     Args:
         user_message: 用户输入文本，None 表示定时推动
         source: 触发源 "cron" 或 "user"
+        job_name: cron 定时作业名；也可用环境变量 ROOM_CRON_JOB_NAME
     
     Returns:
         dict: {"ok": bool, "output": [...], "state": {...}, "decision": {...}}
     """
     global _story_plan_active
 
+    resolved_job = (
+        job_name
+        or os.environ.get("ROOM_CRON_JOB_NAME", "")
+        or ""
+    )
     identity_token = runtime_context.set_identity(user_id, thread_id)
     lf_ctx = LangfuseCtx(
         tick=0,
         user_id=user_id,
         thread_id=thread_id,
         source=source,
+        user_message=user_message,
+        job_name=resolved_job,
     )
+    owns_trace = False
+    tick_result: dict[str, Any] | None = None
+    process_lock_cm = None
     try:
+        owns_trace = (
+            start_room_trace(
+                lf_ctx,
+                name="room.tick",
+                input_data={
+                    "user_message": user_message,
+                    "source": source,
+                    "user_id": user_id,
+                    "thread_id": thread_id,
+                    "job_name": resolved_job,
+                },
+                only_if_no_parent=True,
+            )
+            is not None
+        )
+        try:
+            process_lock_cm = _acquire_room_process_lock(lf_ctx)
+        except TimeoutError as exc:
+            log_error(lf_ctx, "room.lock_timeout", exc)
+            tick_result = {
+                "ok": False,
+                "error": "room_lock_timeout",
+                "output": [{
+                    "role": "系统",
+                    "text": "【Room 忙碌超时，请稍后重试】",
+                }],
+            }
+            return tick_result
+
         log_event(
             lf_ctx,
             "room.tick_enter",
@@ -379,8 +411,10 @@ def tick(
                     ],
                 },
             )
-            lf_flush(lf_ctx)
-            return result
+            if not owns_trace:
+                lf_flush(lf_ctx)
+            tick_result = result
+            return tick_result
 
         if os.environ.get("YANGJIAN_ALLOW_LEGACY_MODE") != "1":
             result = {
@@ -397,8 +431,10 @@ def tick(
                 output_data=result,
                 level="ERROR",
             )
-            lf_flush(lf_ctx)
-            return result
+            if not owns_trace:
+                lf_flush(lf_ctx)
+            tick_result = result
+            return tick_result
 
         # ── 传统模式（仅显式兼容开关启用） ──
         decision = director.decide(state, user_message)
@@ -504,12 +540,13 @@ def tick(
         
         state_manager.save(state)
         
-        return {
+        tick_result = {
             "ok": True,
             "output": outputs,
             "state": state,
             "decision": decision,
         }
+        return tick_result
     
     except Exception as e:
         try:
@@ -518,17 +555,37 @@ def tick(
         except Exception:
             pass
         log_error(lf_ctx, "room.tick_exception", e, input_data=user_message)
-        try:
-            lf_flush(lf_ctx)
-        except Exception:
-            pass
         traceback.print_exc()
-        return {
+        tick_result = {
             "ok": False,
             "error": str(e),
             "output": [{"role": "系统", "text": f"【Room 异常: {e}】"}],
         }
+        return tick_result
     finally:
+        if process_lock_cm is not None:
+            try:
+                process_lock_cm.__exit__(None, None, None)
+            except Exception:
+                pass
+        if owns_trace:
+            end_room_trace(
+                lf_ctx,
+                output_data=tick_result,
+                level=(
+                    "ERROR"
+                    if tick_result and not tick_result.get("ok", True)
+                    else "DEFAULT"
+                ),
+                status_message=str(
+                    (tick_result or {}).get("error") or "ok"
+                ),
+            )
+        else:
+            try:
+                lf_flush(lf_ctx)
+            except Exception:
+                pass
         runtime_context.reset_identity(identity_token)
 
 
@@ -922,6 +979,8 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             "reason": resolve_gate.get("reason"),
         },
     )
+    # Flush so Langfuse shows the gate even while RESOLVE LLM is still running.
+    lf_flush(lf_ctx)
 
     forbidden_fragments = list(bi.get("forbidden_reveals", []))
     for task in directive.get("actor_tasks", []):
@@ -929,70 +988,120 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
 
     resolve_response = None
     if resolve_required:
-        with room_phase(
+        log_event(
             lf_ctx,
-            "room.phase3_resolve",
+            "room.phase3_resolve_enter",
             input_data={
-                "actor_result_ids": [
-                    item.get("result_id") for item in actor_results
-                ]
+                "actor_result_count": len(actor_results),
+                "actor_kinds": [
+                    item.get("kind") for item in actor_results
+                ],
             },
-        ):
-            resolve_request = contracts.new_message(
-                turn_id=turn_id,
-                story_id=str(bi.get("story_id", "story_1")),
-                beat_id=str(bi.get("current_beat_id", "")),
-                phase=contracts.Phase.RESOLVE,
-                sender=room_ref,
-                recipient=director_ref,
-                message_type="director.resolve.input",
-                correlation_id=direct_response.message_id,
-                payload=contracts.DirectorResolveInput(
-                    directive_id=str(directive["directive_id"]),
-                    story_cursor={
-                        "story_id": bi.get("story_id", "story_1"),
-                        "beat_id": bi.get("current_beat_id", ""),
-                        "allowed_information": list(
-                            bi.get("allowed_information", [])
-                        ),
+        )
+        lf_flush(lf_ctx)
+        try:
+            with room_phase(
+                lf_ctx,
+                "room.phase3_resolve",
+                input_data={
+                    "actor_result_ids": [
+                        item.get("result_id") for item in actor_results
+                    ]
+                },
+            ) as phase_bag:
+                log_event(
+                    lf_ctx,
+                    "room.phase3_resolve_build_input",
+                    input_data={
+                        "directive_id": directive.get("directive_id"),
                     },
-                    world_snapshot=dict(state),
-                    actor_results=tuple(
-                        contracts.actor_turn_result_from_dict(item)
-                        for item in actor_results
-                    ),
-                    user_event={
-                        "type": "user_message",
-                        "text": user_message or "",
-                    },
-                    user_turn=dict(directive.get("user_turn", {})),
-                    unlocked_transitions=tuple(
-                        bi.get("available_transitions", ())
-                    ),
-                    allowed_state_operations=(
-                        "set_world_attribute",
-                        "move_item",
-                        "reveal_fact",
-                        "set_character_state",
-                        "advance_beat",
-                    ),
-                ),
-            )
-            resolve_response = director.handle_resolve(resolve_request)
-            resolution = contracts.to_dict(resolve_response.payload)
-            resolution["state_changes"] = resolution.pop("state_operations", [])
-            resolution["next_beat"] = resolution.pop("next_beat_id", None)
-            for decision in resolution.get("decisions", []):
-                if "result_id" in decision:
-                    decision["proposal_id"] = decision.pop("result_id")
-            outputs, confirmed_events = _apply_actor_resolution(
-                actor_results, resolution, forbidden_fragments
-            )
-            confirmed_events.extend(
-                _confirmed_events_from_user_outcome(
-                    resolution.get("user_outcome")
                 )
+                parsed_actor_results = tuple(
+                    contracts.actor_turn_result_from_dict(item)
+                    for item in actor_results
+                )
+                resolve_request = contracts.new_message(
+                    turn_id=turn_id,
+                    story_id=str(bi.get("story_id", "story_1")),
+                    beat_id=str(bi.get("current_beat_id", "")),
+                    phase=contracts.Phase.RESOLVE,
+                    sender=room_ref,
+                    recipient=director_ref,
+                    message_type="director.resolve.input",
+                    correlation_id=direct_response.message_id,
+                    payload=contracts.DirectorResolveInput(
+                        directive_id=str(directive["directive_id"]),
+                        story_cursor={
+                            "story_id": bi.get("story_id", "story_1"),
+                            "beat_id": bi.get("current_beat_id", ""),
+                            "allowed_information": list(
+                                bi.get("allowed_information", [])
+                            ),
+                        },
+                        world_snapshot=dict(state),
+                        actor_results=parsed_actor_results,
+                        user_event={
+                            "type": "user_message",
+                            "text": user_message or "",
+                        },
+                        user_turn=dict(directive.get("user_turn", {})),
+                        unlocked_transitions=tuple(
+                            bi.get("available_transitions", ())
+                        ),
+                        allowed_state_operations=(
+                            "set_world_attribute",
+                            "move_item",
+                            "reveal_fact",
+                            "set_character_state",
+                            "advance_beat",
+                        ),
+                    ),
+                )
+                log_event(
+                    lf_ctx,
+                    "room.phase3_resolve_llm_start",
+                    input_data={"parsed_actor_count": len(parsed_actor_results)},
+                )
+                lf_flush(lf_ctx)
+                resolve_response = director.handle_resolve(resolve_request)
+                resolution = contracts.to_dict(resolve_response.payload)
+                resolution["state_changes"] = resolution.pop(
+                    "state_operations", []
+                )
+                resolution["next_beat"] = resolution.pop("next_beat_id", None)
+                for decision in resolution.get("decisions", []):
+                    if "result_id" in decision:
+                        decision["proposal_id"] = decision.pop("result_id")
+                outputs, confirmed_events = _apply_actor_resolution(
+                    actor_results, resolution, forbidden_fragments
+                )
+                confirmed_events.extend(
+                    _confirmed_events_from_user_outcome(
+                        resolution.get("user_outcome")
+                    )
+                )
+                if isinstance(phase_bag, dict):
+                    phase_bag["output"] = {
+                        "decision_count": len(resolution.get("decisions", [])),
+                        "output_count": len(outputs),
+                    }
+        except Exception as exc:
+            log_error(
+                lf_ctx,
+                "room.phase3_resolve_exception",
+                exc,
+                input_data={
+                    "actor_results": [
+                        {
+                            "result_id": item.get("result_id"),
+                            "kind": item.get("kind"),
+                            "agent_id": item.get("agent_id"),
+                        }
+                        for item in actor_results
+                    ]
+                },
             )
+            raise
         log_event(
             lf_ctx,
             "room.resolution",

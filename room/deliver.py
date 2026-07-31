@@ -29,12 +29,14 @@ def _role_prefix(role: str) -> str | None:
     return None
 
 
-def deliver_outputs(outputs: list[dict], delay: float = 3.0):
+def deliver_outputs(outputs: list[dict], delay: float = 3.0, lf_ctx=None):
     """
     逐条发送 room tick 的输出。
 
     每个 output 是一条独立消息，原样发送。
     空内容跳过。间隔 delay 秒防止 iMessage 合并。
+    Pass ``lf_ctx`` from the parent Room ingress so deliver spans nest in the
+    same Langfuse trace (observation names stay deliver.*).
     """
     from langfuse_logger import LangfuseCtx, log_event
 
@@ -46,7 +48,8 @@ def deliver_outputs(outputs: list[dict], delay: float = 3.0):
     sent = 0
     skipped = 0
     total = len(outputs)
-    lf_ctx = LangfuseCtx(source="deliver")
+    if lf_ctx is None:
+        lf_ctx = LangfuseCtx(source="deliver", user_message=None)
     log_event(
         lf_ctx,
         "deliver.start",

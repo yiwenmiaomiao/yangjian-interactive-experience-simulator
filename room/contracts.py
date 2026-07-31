@@ -760,66 +760,99 @@ def actor_turn_result_from_dict(
     abstention_data = data.get("abstention")
     proposal = None
     abstention = None
+    kind = str(data.get("kind", "")).strip() or (
+        "abstain" if abstention_data else "proposal"
+    )
     if isinstance(proposal_data, Mapping):
         dialogue_data = proposal_data.get("dialogue")
         action_data = proposal_data.get("action")
-        proposal = ActorProposal(
-            proposal_id=str(proposal_data["proposal_id"]),
-            task_id=str(data["task_id"]),
-            agent_id=str(data["agent_id"]),
-            intent=str(proposal_data["intent"]),
-            dialogue=(
-                DialogueProposal(
-                    text=str(dialogue_data["text"]),
-                    intent=str(dialogue_data.get("intent", "")),
-                    addressee_ids=tuple(
-                        dialogue_data.get("addressee_ids", ())
-                    ),
-                )
-                if isinstance(dialogue_data, Mapping)
-                and dialogue_data.get("text")
-                else None
-            ),
-            action=(
-                ActionProposal(
-                    description=str(action_data["description"]),
-                    action_type=str(action_data.get("action_type", "act")),
-                    target_ids=tuple(action_data.get("target_ids", ())),
-                    expected_effects=tuple(
-                        action_data.get("expected_effects", ())
-                    ),
-                )
-                if isinstance(action_data, Mapping)
-                and action_data.get("description")
-                else None
-            ),
-            proposed_effects=tuple(
-                proposal_data.get("proposed_effects", ())
-            ),
-            confidence=float(proposal_data.get("confidence", 0.5)),
-            referenced_fact_ids=tuple(
-                proposal_data.get("referenced_fact_ids", ())
-            ),
-        )
-    if isinstance(abstention_data, Mapping):
+        try:
+            proposal = ActorProposal(
+                proposal_id=str(
+                    proposal_data.get("proposal_id")
+                    or data.get("result_id")
+                    or f"proposal_{data.get('agent_id', 'actor')}"
+                ),
+                task_id=str(data["task_id"]),
+                agent_id=str(data["agent_id"]),
+                intent=str(proposal_data.get("intent") or "respond"),
+                dialogue=(
+                    DialogueProposal(
+                        text=str(dialogue_data["text"]),
+                        intent=str(dialogue_data.get("intent", "")),
+                        addressee_ids=tuple(
+                            dialogue_data.get("addressee_ids", ())
+                        ),
+                    )
+                    if isinstance(dialogue_data, Mapping)
+                    and dialogue_data.get("text")
+                    else None
+                ),
+                action=(
+                    ActionProposal(
+                        description=str(action_data["description"]),
+                        action_type=str(action_data.get("action_type", "act")),
+                        target_ids=tuple(action_data.get("target_ids", ())),
+                        expected_effects=tuple(
+                            action_data.get("expected_effects", ())
+                        ),
+                    )
+                    if isinstance(action_data, Mapping)
+                    and action_data.get("description")
+                    else None
+                ),
+                proposed_effects=tuple(
+                    proposal_data.get("proposed_effects", ())
+                ),
+                confidence=float(proposal_data.get("confidence", 0.5)),
+                referenced_fact_ids=tuple(
+                    proposal_data.get("referenced_fact_ids", ())
+                ),
+            )
+        except ValueError:
+            # Empty / invalid proposal → treat as abstention.
+            proposal = None
+            kind = "abstain"
+            abstention_data = abstention_data or {
+                "reason_code": "EMPTY_PROPOSAL",
+                "reason": "Actor proposal lacked dialogue and action",
+            }
+    if isinstance(abstention_data, Mapping) and proposal is None:
         abstention = AbstainRequest(
             request_id=str(
-                abstention_data.get("request_id", data["result_id"])
+                abstention_data.get(
+                    "request_id",
+                    data.get("result_id", "abstain_unknown"),
+                )
             ),
             task_id=str(data["task_id"]),
             agent_id=str(data["agent_id"]),
-            reason_code=str(abstention_data["reason_code"]),
-            reason=str(abstention_data["reason"]),
+            reason_code=str(
+                abstention_data.get("reason_code") or "INSUFFICIENT_CONTEXT"
+            ),
+            reason=str(
+                abstention_data.get("reason") or "Actor abstained"
+            ),
             blocked_by=tuple(abstention_data.get("blocked_by", ())),
             suggested_condition=str(
                 abstention_data.get("suggested_condition", "")
             ),
         )
+        kind = "abstain"
+    if proposal is None and abstention is None:
+        abstention = AbstainRequest(
+            request_id=str(data.get("result_id", "abstain_unknown")),
+            task_id=str(data.get("task_id", "unknown_task")),
+            agent_id=str(data.get("agent_id", "unknown")),
+            reason_code="INVALID_ACTOR_RESULT",
+            reason="Actor result could not be parsed",
+        )
+        kind = "abstain"
     return ActorTurnResult(
-        result_id=str(data["result_id"]),
-        task_id=str(data["task_id"]),
-        agent_id=str(data["agent_id"]),
-        kind=ActorResultKind(str(data["kind"])),
+        result_id=str(data.get("result_id") or (abstention.request_id if abstention else "result_unknown")),
+        task_id=str(data.get("task_id") or ""),
+        agent_id=str(data.get("agent_id") or ""),
+        kind=ActorResultKind(kind),
         proposal=proposal,
         abstention=abstention,
     )

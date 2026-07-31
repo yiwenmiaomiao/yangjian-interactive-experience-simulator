@@ -81,6 +81,65 @@ def safe_json(value: Any, max_len: int = 8000) -> str:
     return _truncate(text, max_len)
 
 
+def _to_io(value: Any, *, fallback: Any = None) -> Any:
+    """Langfuse input/output: prefer JSON-serializable objects, never leave unset."""
+    if value is None:
+        return fallback if fallback is not None else {"status": "ok"}
+    try:
+        # Ensure value is JSON-serializable for the Langfuse UI.
+        encoded = json.dumps(value, ensure_ascii=False, default=str)
+        if len(encoded) > 12000:
+            return {"preview": _truncate(encoded, 8000), "truncated": True}
+        return json.loads(encoded)
+    except Exception:
+        return {"value": _truncate(str(value), 2000)}
+
+
+_TRACE_NAME_MAX = 200
+
+
+def build_trace_name(
+    user_message: Any = None,
+    *,
+    source: str = "",
+    job_name: str = "",
+) -> str:
+    """Langfuse *trace* display name (not observation name).
+
+    Rules:
+    - non-empty user message → that text (whitespace-normalized, clipped)
+    - empty / whitespace-only user message → ``NA``
+    - cron with no user message → scheduled job name (else ``NA``)
+    - any other missing message → ``NA``
+    """
+    if isinstance(user_message, str):
+        text = " ".join(user_message.split())
+        if text:
+            if len(text) > _TRACE_NAME_MAX:
+                return text[: _TRACE_NAME_MAX - 1] + "…"
+            return text
+        return "NA"
+
+    if source == "cron" or job_name:
+        name = " ".join(str(job_name or "").split())
+        return name[:_TRACE_NAME_MAX] if name else "NA"
+
+    return "NA"
+
+
+def _has_active_otel_span() -> bool:
+    try:
+        from opentelemetry import trace
+
+        span = trace.get_current_span()
+        if span is None:
+            return False
+        ctx = span.get_span_context()
+        return bool(ctx and ctx.is_valid and span.is_recording())
+    except Exception:
+        return False
+
+
 class LangfuseCtx:
     def __init__(
         self,
@@ -92,6 +151,9 @@ class LangfuseCtx:
         thread_id: str = "default",
         source: str = "",
         turn_id: str = "",
+        user_message: Any = None,
+        job_name: str = "",
+        trace_name: str = "",
     ):
         self.tick = tick
         self.story_id = story_id
@@ -100,9 +162,15 @@ class LangfuseCtx:
         self.thread_id = thread_id
         self.source = source
         self.turn_id = turn_id or f"turn_{tick}"
+        self.user_message = user_message
+        self.job_name = job_name
+        self.trace_name = trace_name or build_trace_name(
+            user_message, source=source, job_name=job_name
+        )
         self.session_id = f"{user_id}:{thread_id}"
         self.started_at = time.time()
         self._root = None
+        self._owns_root = False
         self._phase_stack: list[Any] = []
 
     def base_metadata(self) -> dict[str, Any]:
@@ -114,7 +182,15 @@ class LangfuseCtx:
             "thread_id": self.thread_id,
             "source": self.source,
             "turn_id": self.turn_id,
+            "trace_name": self.trace_name,
+            "job_name": self.job_name,
         }
+
+    def set_user_message(self, user_message: Any) -> None:
+        self.user_message = user_message
+        self.trace_name = build_trace_name(
+            user_message, source=self.source, job_name=self.job_name
+        )
 
 
 def _noop_cm():
@@ -129,29 +205,48 @@ def start_room_trace(
     *,
     name: str = "room.tick",
     input_data: Any = None,
+    only_if_no_parent: bool = False,
 ):
-    """Open a root Room span for one inbound message / tick."""
+    """Open a root Room span for one inbound message / tick.
+
+    ``name`` is the observation/span name (unchanged operational label).
+    ``ctx.trace_name`` is the Langfuse *trace* name, set via
+    ``propagate_attributes(trace_name=...)``.
+    """
     if not _ENABLED:
         return None
     lf = _get_client()
     if lf is None:
         return None
+    if only_if_no_parent and _has_active_otel_span():
+        return None
+    if not ctx.trace_name:
+        ctx.trace_name = build_trace_name(
+            ctx.user_message, source=ctx.source, job_name=ctx.job_name
+        )
     try:
         from langfuse import propagate_attributes
 
         attrs = propagate_attributes(
             session_id=ctx.session_id,
             user_id=ctx.user_id,
+            trace_name=ctx.trace_name,
+            metadata={
+                "source": ctx.source,
+                "turn_id": ctx.turn_id,
+            },
         )
         attrs.__enter__()
         obs = lf.start_as_current_observation(
             as_type="span",
             name=name,
-            input=safe_json(input_data) if input_data is not None else None,
+            input=_to_io(input_data, fallback={"status": "started"}),
+            output={"status": "running"},
             metadata=ctx.base_metadata(),
         )
         root = obs.__enter__()
         ctx._root = (attrs, obs, root)
+        ctx._owns_root = True
         return root
     except Exception as exc:
         print(f"[langfuse] start_room_trace failed: {exc}", flush=True)
@@ -172,8 +267,12 @@ def end_room_trace(
     attrs, obs, root = ctx._root
     try:
         if root is not None:
-            if output_data is not None:
-                root.update(output=safe_json(output_data))
+            root.update(
+                output=_to_io(
+                    output_data,
+                    fallback={"status": status_message or "done"},
+                )
+            )
             meta = ctx.base_metadata()
             meta["duration_ms"] = round((time.time() - ctx.started_at) * 1000, 1)
             if status_message:
@@ -191,59 +290,81 @@ def end_room_trace(
         print(f"[langfuse] end_room_trace failed: {exc}", flush=True)
     finally:
         ctx._root = None
+        ctx._owns_root = False
         flush(ctx)
 
 
 @contextmanager
 def room_phase(ctx: LangfuseCtx, name: str, *, input_data: Any = None):
-    """Nested span for Room phases (ingress / direct / act / resolve / deliver)."""
+    """Nested span for Room phases (ingress / direct / act / resolve / deliver).
+
+    Yields a mutable dict ``{"output": ...}``. Callers may set ``bag["output"]``
+    before exiting; otherwise a default ``{"status": "ok"}`` is written so the
+    Langfuse UI never shows output as undefined.
+    """
+    bag: dict[str, Any] = {"output": None}
     if not _ENABLED or _get_client() is None:
-        yield None
+        yield bag
         return
+
     lf = _get_client()
     started = time.time()
     try:
-        with lf.start_as_current_observation(
+        obs_cm = lf.start_as_current_observation(
             as_type="span",
             name=name,
-            input=safe_json(input_data) if input_data is not None else None,
+            input=_to_io(input_data, fallback={"status": "started"}),
+            output={"status": "running"},
             metadata=ctx.base_metadata(),
-        ) as span:
+        )
+    except Exception as exc:
+        print(f"[langfuse] room_phase({name}) start failed: {exc}", flush=True)
+        yield bag
+        return
+
+    with obs_cm as span:
+        try:
+            yield bag
+        except Exception as exc:
             try:
-                yield span
-            except Exception as exc:
-                try:
-                    span.update(
-                        level="ERROR",
-                        output=safe_json({
-                            "error": str(exc),
-                            "traceback": traceback.format_exc(),
-                        }),
-                        metadata={
-                            **ctx.base_metadata(),
+                span.update(
+                    level="ERROR",
+                    output=_to_io({
+                        "status": "error",
+                        "error": str(exc),
+                        "traceback": traceback.format_exc(),
+                    }),
+                    metadata={
+                        **ctx.base_metadata(),
+                        "duration_ms": round(
+                            (time.time() - started) * 1000, 1
+                        ),
+                    },
+                )
+            except Exception:
+                pass
+            raise
+        else:
+            try:
+                span.update(
+                    output=_to_io(
+                        bag.get("output"),
+                        fallback={
+                            "status": "ok",
                             "duration_ms": round(
                                 (time.time() - started) * 1000, 1
                             ),
                         },
-                    )
-                except Exception:
-                    pass
-                raise
-            else:
-                try:
-                    span.update(
-                        metadata={
-                            **ctx.base_metadata(),
-                            "duration_ms": round(
-                                (time.time() - started) * 1000, 1
-                            ),
-                        }
-                    )
-                except Exception:
-                    pass
-    except Exception:
-        # Never break Room because of logging.
-        yield None
+                    ),
+                    metadata={
+                        **ctx.base_metadata(),
+                        "duration_ms": round(
+                            (time.time() - started) * 1000, 1
+                        ),
+                    },
+                )
+            except Exception:
+                pass
 
 
 def log_event(
@@ -255,7 +376,10 @@ def log_event(
     level: str = "DEFAULT",
     metadata: dict[str, Any] | None = None,
 ):
-    """Fire-and-forget event/span for Room milestones."""
+    """Fire-and-forget event/span for Room milestones.
+
+    Always sets both input and output so Langfuse UI does not show undefined.
+    """
     if not _ENABLED:
         return
     lf = _get_client()
@@ -267,18 +391,27 @@ def log_event(
         meta = ctx.base_metadata()
         if metadata:
             meta.update(metadata)
+        # If caller only provided one side, mirror it so the UI is readable.
+        if input_data is None and output_data is not None:
+            input_data = {"status": "event"}
+        if output_data is None and input_data is not None:
+            output_data = {"status": "recorded", "echo": input_data}
+        if input_data is None and output_data is None:
+            input_data = {"status": "event"}
+            output_data = {"status": "recorded"}
+
         with propagate_attributes(session_id=ctx.session_id, user_id=ctx.user_id):
             with lf.start_as_current_observation(
                 as_type="span",
                 name=name,
-                input=safe_json(input_data) if input_data is not None else None,
-                output=safe_json(output_data) if output_data is not None else None,
+                input=_to_io(input_data),
+                output=_to_io(output_data),
                 metadata=meta,
                 level=level,
             ):
                 pass
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[langfuse] log_event({name}) failed: {exc}", flush=True)
 
 
 def log_error(

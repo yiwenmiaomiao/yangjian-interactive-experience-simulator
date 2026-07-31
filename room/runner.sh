@@ -16,7 +16,7 @@ source .env 2>/dev/null || true
 export DEEPSEEK_API_KEY
 export http_proxy https_proxy no_proxy
 
-# 运行 room tick
+# 运行 room tick（作业名经 ROOM_CRON_JOB_NAME 写入 Langfuse trace name）
 "$PYTHON_BIN" -c "
 import sys; sys.path.insert(0, '.')
 from room import room

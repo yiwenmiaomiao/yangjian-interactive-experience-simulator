@@ -1,8 +1,10 @@
 """
-Langfuse 日志集成 — v4 API
+Langfuse 日志集成 - v4 API
 
-Room 入口级日志：只要消息打到 Room，就记录完整链路。
-session_id 通过 propagate_attributes() 传播。
+精简版：只记录三类信息
+1. Room 进出的消息（trace input/output）
+2. Room 当前状态机（beat/scene/resolve_gate）
+3. 每个 agent 的输入输出（log_generation）
 """
 from __future__ import annotations
 
@@ -86,7 +88,6 @@ def _to_io(value: Any, *, fallback: Any = None) -> Any:
     if value is None:
         return fallback if fallback is not None else {"status": "ok"}
     try:
-        # Ensure value is JSON-serializable for the Langfuse UI.
         encoded = json.dumps(value, ensure_ascii=False, default=str)
         if len(encoded) > 12000:
             return {"preview": _truncate(encoded, 8000), "truncated": True}
@@ -104,14 +105,6 @@ def build_trace_name(
     source: str = "",
     job_name: str = "",
 ) -> str:
-    """Langfuse *trace* display name (not observation name).
-
-    Rules:
-    - non-empty user message → that text (whitespace-normalized, clipped)
-    - empty / whitespace-only user message → ``NA``
-    - cron with no user message → scheduled job name (else ``NA``)
-    - any other missing message → ``NA``
-    """
     if isinstance(user_message, str):
         text = " ".join(user_message.split())
         if text:
@@ -119,18 +112,15 @@ def build_trace_name(
                 return text[: _TRACE_NAME_MAX - 1] + "…"
             return text
         return "NA"
-
     if source == "cron" or job_name:
         name = " ".join(str(job_name or "").split())
         return name[:_TRACE_NAME_MAX] if name else "NA"
-
     return "NA"
 
 
 def _has_active_otel_span() -> bool:
     try:
         from opentelemetry import trace
-
         span = trace.get_current_span()
         if span is None:
             return False
@@ -207,12 +197,7 @@ def start_room_trace(
     input_data: Any = None,
     only_if_no_parent: bool = False,
 ):
-    """Open a root Room span for one inbound message / tick.
-
-    ``name`` is the observation/span name (unchanged operational label).
-    ``ctx.trace_name`` is the Langfuse *trace* name, set via
-    ``propagate_attributes(trace_name=...)``.
-    """
+    """Open a root Room span: 记录 Room 进出的消息。"""
     if not _ENABLED:
         return None
     lf = _get_client()
@@ -260,7 +245,7 @@ def end_room_trace(
     level: str = "DEFAULT",
     status_message: str = "",
 ):
-    """Close the root Room span and flush."""
+    """Close the root Room span: 记录 Room 最终输出消息。"""
     if ctx._root is None:
         flush(ctx)
         return
@@ -296,12 +281,7 @@ def end_room_trace(
 
 @contextmanager
 def room_phase(ctx: LangfuseCtx, name: str, *, input_data: Any = None):
-    """Nested span for Room phases (ingress / direct / act / resolve / deliver).
-
-    Yields a mutable dict ``{"output": ...}``. Callers may set ``bag["output"]``
-    before exiting; otherwise a default ``{"status": "ok"}`` is written so the
-    Langfuse UI never shows output as undefined.
-    """
+    """Nested span for Room phases. 精简后只保留 room.tick 这一层。"""
     bag: dict[str, Any] = {"output": None}
     if not _ENABLED or _get_client() is None:
         yield bag
@@ -317,8 +297,7 @@ def room_phase(ctx: LangfuseCtx, name: str, *, input_data: Any = None):
             output={"status": "running"},
             metadata=ctx.base_metadata(),
         )
-    except Exception as exc:
-        print(f"[langfuse] room_phase({name}) start failed: {exc}", flush=True)
+    except Exception:
         yield bag
         return
 
@@ -376,10 +355,30 @@ def log_event(
     level: str = "DEFAULT",
     metadata: dict[str, Any] | None = None,
 ):
-    """Fire-and-forget event/span for Room milestones.
+    """记录 Room 状态机关键节点。
 
-    Always sets both input and output so Langfuse UI does not show undefined.
+    精简后只记录以下事件（其余静默跳过）：
+    - room.tick_enter / room.tick_exit: tick 进出
+    - room.directive: director DIRECT 输出
+    - room.resolution: director RESOLVE 输出
+    - room.resolve_gate: 是否走 fast path / full path
+    - room.publish: 最终发布的消息
+    - room.recovery_auto_advance: 状态机自动推进
+    - room.scene_location_from_narrator: 场景地点变更
     """
+    _ALLOWED = {
+        "room.tick_enter",
+        "room.tick_exit",
+        "room.directive",
+        "room.resolution",
+        "room.resolve_gate",
+        "room.publish",
+        "room.recovery_auto_advance",
+        "room.scene_location_from_narrator",
+    }
+    if name not in _ALLOWED:
+        return
+
     if not _ENABLED:
         return
     lf = _get_client()
@@ -391,7 +390,6 @@ def log_event(
         meta = ctx.base_metadata()
         if metadata:
             meta.update(metadata)
-        # If caller only provided one side, mirror it so the UI is readable.
         if input_data is None and output_data is not None:
             input_data = {"status": "event"}
         if output_data is None and input_data is not None:
@@ -422,6 +420,13 @@ def log_error(
     input_data: Any = None,
     extra: dict[str, Any] | None = None,
 ):
+    """错误日志：始终记录，不受 _ALLOWED 过滤。"""
+    if not _ENABLED:
+        return
+    lf = _get_client()
+    if lf is None:
+        return
+
     tb = ""
     if isinstance(error, BaseException):
         tb = "".join(
@@ -433,14 +438,24 @@ def log_error(
     payload = {"error": message, "traceback": tb}
     if extra:
         payload["extra"] = extra
-    log_event(
-        ctx,
-        name,
-        input_data=input_data,
-        output_data=payload,
-        level="ERROR",
-        metadata={"error": message[:300]},
-    )
+
+    try:
+        from langfuse import propagate_attributes
+
+        meta = ctx.base_metadata()
+        meta["error"] = message[:300]
+        with propagate_attributes(session_id=ctx.session_id, user_id=ctx.user_id):
+            with lf.start_as_current_observation(
+                as_type="span",
+                name=name,
+                input=_to_io(input_data) if input_data else {"status": "error"},
+                output=_to_io(payload),
+                metadata=meta,
+                level="ERROR",
+            ):
+                pass
+    except Exception:
+        pass
 
 
 def log_generation(
@@ -452,7 +467,7 @@ def log_generation(
     duration_ms: float = 0,
     metadata: dict[str, Any] | None = None,
 ):
-    """记录一次 LLM 调用。"""
+    """记录每个 agent 的 LLM 调用输入输出。"""
     if not _ENABLED:
         return
     lf = _get_client()
@@ -512,28 +527,8 @@ def log_generation(
 def log_state_change(
     ctx: LangfuseCtx, key: str, value: Any, source: str = "room"
 ):
-    if not _ENABLED:
-        return
-    lf = _get_client()
-    if lf is None:
-        return
-
-    try:
-        from langfuse import propagate_attributes
-
-        with propagate_attributes(session_id=ctx.session_id, user_id=ctx.user_id):
-            with lf.start_as_current_observation(
-                as_type="span",
-                name=f"state/{source}.{key}",
-                metadata={
-                    **ctx.base_metadata(),
-                    "state_key": key,
-                    "state_value": str(value)[:200],
-                },
-            ):
-                pass
-    except Exception:
-        pass
+    """状态变更：精简后静默跳过，state_changes 已在 room.resolution 里记录。"""
+    return
 
 
 def flush(ctx: LangfuseCtx | None = None):

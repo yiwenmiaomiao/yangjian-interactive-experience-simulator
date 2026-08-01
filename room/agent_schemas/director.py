@@ -93,6 +93,21 @@ class DirectorTaskOutput(BaseModel):
         return result
 
 
+class SceneUpdateOutput(BaseModel):
+    """Optional scene change directive from Director.
+
+    All fields are optional; null/missing means "no change".
+    Only non-null values are merged into world_state.scene.
+    """
+
+    model_config = _CFG
+
+    location: str | None = None
+    weather: str | None = None
+    time_of_day: str | None = None
+    mood: str | None = None
+
+
 class DirectorNarrationOutput(BaseModel):
     model_config = _CFG
 
@@ -156,6 +171,7 @@ class DirectorDirectiveOutput(BaseModel):
     resolve_gate: ResolveGateOutput
     tasks: list[DirectorTaskOutput] = Field(default_factory=list)
     narration: DirectorNarrationOutput
+    scene_update: SceneUpdateOutput | None = None
 
 
 class UserOutcomeOutput(BaseModel):
@@ -217,3 +233,4 @@ class DirectorResolutionOutput(BaseModel):
     state_changes: list[StateOperationOutput] = Field(default_factory=list)
     next_beat: str | None = None
     continuation: ContinuationOutput
+    scene_update: SceneUpdateOutput | None = None

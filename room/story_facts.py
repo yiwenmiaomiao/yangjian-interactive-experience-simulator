@@ -46,8 +46,12 @@ def load_facts() -> dict[str, Any]:
 def save_facts(facts: dict[str, Any]) -> None:
     facts["version"] = facts.get("version", 0) + 1
     facts["updated_at"] = datetime.datetime.now().isoformat()
-    with open(runtime_context.scoped_path(FACTS_PATH), "w", encoding="utf-8") as f:
+    path = runtime_context.scoped_path(FACTS_PATH)
+    # 原子写入：先写临时文件再 rename，避免进程中断留下残缺 JSON
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(facts, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
 
 
 def set_item_location(item: str, location: str) -> None:
@@ -77,27 +81,51 @@ def get_facts_summary() -> str:
     facts = load_facts()
     parts = []
 
+    # 从 world_state 读取 scene
+    scene = _load_world_scene()
+    if scene:
+        parts.append("当前场景：")
+        for k, label in [
+            ("location", "  地点"),
+            ("weather", "  天气"),
+            ("time_of_day", "  时间"),
+            ("mood", "  氛围"),
+        ]:
+            v = scene.get(k, "")
+            if v:
+                parts.append(f"{label}：{v}")
+
     items = facts.get("item_locations", {})
     if items:
         parts.append("物品位置：")
         for item, loc in items.items():
-            parts.append(f"  {item} → {loc}")
+            parts.append(f"  {item} -> {loc}")
 
     chars = facts.get("character_states", {})
     if chars:
         parts.append("角色状态：")
         for char, state in chars.items():
-            parts.append(f"  {char} → {state}")
+            parts.append(f"  {char} -> {state}")
 
     revealed = facts.get("revealed_information", [])
     if revealed:
         parts.append(f"已揭露信息：{'、'.join(revealed[-5:])}")
 
-    scene = facts.get("current_scene", "")
-    if scene:
-        parts.insert(0, f"当前场景：{scene}")
-
     return "\n".join(parts)
+
+
+def _load_world_scene() -> dict:
+    """Load scene from world_state.json."""
+    import runtime_context
+    state_path = runtime_context.scoped_path(
+        os.path.join(BASE_DIR, "world_state.json")
+    )
+    try:
+        with open(state_path, encoding="utf-8") as f:
+            state = json.load(f)
+        return state.get("scene", {})
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
 
 def reset_facts() -> None:

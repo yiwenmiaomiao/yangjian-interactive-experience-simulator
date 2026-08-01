@@ -66,8 +66,24 @@ def _format_public_message(message: Any) -> str:
 
 
 def _build_turn_prompt(turn_input: contracts.YangJianTurnInput) -> str:
+    scene = turn_input.scene
+    scene_parts = []
+    if isinstance(scene, dict):
+        loc = scene.get("location", "")
+        if loc:
+            scene_parts.append(f"地理位置：{loc}")
+        weather = scene.get("weather", "")
+        if weather:
+            scene_parts.append(f"天气：{weather}")
+        tod = scene.get("time_of_day", "")
+        if tod:
+            scene_parts.append(f"时间：{tod}")
+        mood = scene.get("mood", "")
+        if mood:
+            scene_parts.append(f"氛围：{mood}")
+    scene_str = "\n".join(scene_parts) if scene_parts else str(scene.get("id", "") if isinstance(scene, dict) else scene)
     lines = [
-        f"场景：{turn_input.scene.get('id', '')}",
+        f"当前场景：\n{scene_str}",
         f"本回合任务：{turn_input.task.objective}",
     ]
     if turn_input.task.success_condition.strip():
@@ -122,6 +138,7 @@ def act_turn(turn_input: contracts.YangJianTurnInput) -> dict:
             }],
             temperature=0.6,
             max_tokens=4000,
+            llm_model=os.environ.get("YANGJIAN_ACTOR_LLM_MODEL") or None,
         )
     except StructuredOutputError:
         data = ActorTurnOutput(
@@ -265,7 +282,11 @@ def act(director_decision, perception):
     # memory = _load_memory()
     
     event_context = director_decision.get("outcome", "无")
-    scene = director_decision.get("scene", "")
+    scene = director_decision.get("scene", {})
+    if isinstance(scene, dict):
+        scene_str = scene.get("location", "") or str(scene)
+    else:
+        scene_str = str(scene)
     
     # 提取杨戬阶段目标
     my_goal = "无特殊要求"
@@ -281,7 +302,7 @@ def act(director_decision, perception):
                     my_goal = nested_goal
                     break
     
-    context = f"场景：{scene}\n事件：{event_context}"
+    context = f"场景：{scene_str}\n事件：{event_context}"
     
     prompt = INPUT_TEMPLATE.format(
         soul=soul,
@@ -295,6 +316,7 @@ def act(director_decision, perception):
         messages=[{"role": "user", "content": prompt}],
         temperature=0.6,
         max_tokens=4000,
+        model=os.environ.get("YANGJIAN_ACTOR_LLM_MODEL") or None,
     )
     
     return _parse_output(raw)

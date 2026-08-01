@@ -158,6 +158,13 @@ narration 是用户的眼睛。用户只能通过 narration 感知环境。角�
 - user_feedback：确定性环境反馈；disclosure.required=true 时必须提供
 - required=true 时 inline_effects 必须为空（state_operations=[]，user_feedback=null）
 
+## scene_update 规则
+- 当用户移动到新地点、天气变化、时间推进时，通过 scene_update 声明
+- 只需填写变化了的字段，不变的字段填 null 或省略
+- location 是人类可读的地名，如"灌江口·密室"、"桃山·山脚"，不是 beat ID
+- 你不写场景描写文本，只声明场景要素变化，旁白负责描写
+- 如果场景没有变化，省略 scene_update 或全部填 null
+
 ## 钩子规则（每回合必须遵守）
 每回合的输出组合必须包含至少一个未闭合的入口，让用户知道"接下来可以做什么"。
 钩子来源有优先级，优先用旁白和 NPC，杨戬只在必要时才作为钩子来源：
@@ -181,6 +188,12 @@ STORY_CONTEXT_TEMPLATE = """
 
 当前 Beat：{beat_id}
 Beat 目的：{beat_purpose}
+
+当前场景：
+  地理位置：{scene_location}
+  天气：{scene_weather}
+  时间：{scene_time_of_day}
+  氛围：{scene_mood}
 
 允许透露的信息：{allowed_info}
 禁止透露的信息：{forbidden_reveals}
@@ -341,11 +354,168 @@ def _get_relationship_summary() -> str:
         return "未知"
 
 
+# ── Fast direct（跳过 LLM 的确定性调度） ────────────────
+
+
+def _fast_direct_directive(
+    bi: dict[str, Any],
+    user_message: str | None,
+) -> dict[str, Any] | None:
+    """确定性构造 directive，不调 LLM。
+
+    仅适用于用户输入是 passive / dialogue（说话或简单回应），
+    不需要导演理解复杂意图。返回 None 表示不能走 fast path。
+
+    生成：
+    - user_turn: 由用户输入推断 kind
+    - resolve_gate: fast path（required=false）
+    - actor_tasks: 派给 yangjian 一个通用回应任务
+    - narration: 场景变化或用户独处时 required=true
+    """
+    beat_id = str(bi.get("current_beat_id", ""))
+    beat_purpose = str(bi.get("beat_purpose", ""))
+    has_npc = bool(bi.get("active_npcs"))
+
+    # 判断用户输入类型
+    text = (user_message or "").strip()
+    if not text:
+        # 无用户输入（cron 推动）：交给 LLM 处理，不 fast path
+        return None
+
+    # 行动 vs 对话的区分：括号包裹的（动作）格式就是行动，
+    # 其余一律视为对话。行动必须走 LLM director——
+    # director 会输出 user_turn.kind=physical_action，Room 据此强制旁白揭示环境。
+    physical_markers = (
+        "打开", "拿起", "放下", "进入", "走向", "离开", "跑", "推",
+        "拉", "触碰", "摸", "打开盒子", "进去", "下去", "过来", "跟上",
+    )
+    if any(marker in text for marker in physical_markers):
+        return None
+    # 括号包裹 = 行动（（仔细看是什么）、（观察四周）、（走向裂隙））
+    if text.startswith("（") or text.startswith("("):
+        return None
+
+    kind = "dialogue" if len(text) > 4 else "passive"
+
+    # 判断是否需要旁白
+    narration_required = False
+    narration_type = "旁白"
+    narration_brief = ""
+    # 场景变化标记（由调用方在 bi 里设置）
+    if bi.get("_scene_changed"):
+        narration_required = True
+        narration_type = "场景"
+        narration_brief = "用户进入新场景，描述用户此刻看到的环境"
+    # 用户独处（无 NPC、beat 要求用户独自行动）
+    elif not has_npc and "独自" in beat_purpose:
+        narration_required = True
+        narration_type = "线索"
+        narration_brief = "用户独自一人，描述环境变化或线索，引导用户下一步行动"
+
+    # 构造推进方向提示（transition 的后果）
+    transitions = bi.get("available_transitions", [])
+    advance_parts = []
+    for t in transitions:
+        cons = t.get("preserved_consequences", [])
+        target = t.get("target_id", "")
+        if cons:
+            advance_parts.append(f"向「{target}」推进的条件：{'、'.join(cons)}")
+    advance_text = "；".join(advance_parts)
+
+    tick_count = bi.get("beat_tick_counter", 0)
+    if tick_count > 0:
+        tick_note = (
+            f"本 beat 已停留 {tick_count} 轮。若局面已达成 beat 目的"
+            "（如已承认隐瞒、已松口交代关联），不要再重复之前的说法，"
+            "应让局面自然向前发展（行动、转移、或把话题引向下一步）。"
+        )
+    else:
+        tick_note = ""
+
+    task_objective = (
+        f"用户说：{str(user_message or '')[:80]}。\n"
+        f"当前 beat 目的：{beat_purpose[:150]}。\n"
+        f"{advance_text}\n"
+        f"{tick_note}\n"
+        "以杨戬的人设回应——高傲寡言，点到为止，不展开长篇解释。"
+        "不要重复上一轮已经说过的话。"
+        "可以回应、可以行动，也可以选择不回应（abstain）。"
+    )
+
+    directive = {
+        "mode": "DIRECT",
+        "chapter": bi.get("story_id", "story_1"),
+        "beat": beat_id,
+        "observed_user_intent": {
+            "intent": "用户与杨戬对话/回应",
+            "confidence": 0.5,
+        },
+        "user_turn": {
+            "kind": kind,
+            "target": None,
+            "disclosure": {"required": False, "mode": "none"},
+        },
+        "resolve_gate": {
+            "required": False,
+            "reason": "fast_direct: 简单对话，确定性调度",
+            "act_required": True,
+        },
+        "inline_effects": {
+            "state_operations": [],
+            "user_feedback": None,
+        },
+        "tasks": [{
+            "task_id": f"task_yangjian_{beat_id}",
+            "target": "yangjian",
+            "source_reference": beat_id,
+            "objective": task_objective,
+            "information_ids": [],
+            "success_condition": "产生符合角色的行动或明确不行动原因",
+        }],
+        "npc_commands": [],
+        "desired_progress": "maintain",
+        "selected_side_arc": None,
+        "narration": {
+            "required": narration_required,
+            "purpose": "scene_opening" if narration_type == "场景" else (
+                "external_event" if narration_type == "线索" else "none"
+            ),
+            "timing": "before_dialogue" if narration_required else "none",
+            "narration_type": narration_type,
+            "visible_facts": [],
+            "max_characters": 150 if narration_required else 0,
+            "brief": narration_brief,
+            "scene_facts": [],
+        },
+        "fallback_world_event": None,
+        "_fast_direct": True,
+    }
+    runtime = _canonical_directive_to_runtime(directive, bi)
+    runtime["_fast_direct"] = True
+    return runtime
+
+
 def _decide_story(state, user_message=None) -> dict[str, Any]:
-    """故事计划模式：输出结构化调度指令。"""
+    """故事计划模式：输出结构化调度指令。
+
+    fast_direct 是默认路径：
+    - passive/dialogue 用户输入：跳过 LLM，确定性构造 directive（不花时间）
+    - physical_action/declarative_choice：仍调 LLM，但用非推理模型
+      （deepseek-chat），避免 reasoning_tokens 拖慢响应
+
+    可用 YANGJIAN_DIRECTOR_LLM_MODEL 覆盖 director 使用的模型。
+    """
+    import os as _os
+
     bi = _CACHED_BEAT_INFO
     if not bi:
         return _fallback_directive()
+
+    fast = _fast_direct_directive(bi, user_message)
+    if fast is not None:
+        return fast
+
+    llm_model = _os.environ.get("YANGJIAN_DIRECTOR_LLM_MODEL") or None
 
     side_arcs_list = [a["arc_id"] for a in bi.get("available_side_arcs", [])]
     side_text = f"可进入副线: {side_arcs_list}" if side_arcs_list else "无"
@@ -371,9 +541,14 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
     display_map = actor_display_map(available_ids) or "yangjian=杨戬"
     pool_token = set_available_targets(available_ids)
 
+    scene = state.get("scene", {})
     context = STORY_CONTEXT_TEMPLATE.format(
         beat_id=bi.get("current_beat_id", ""),
         beat_purpose=bi.get("beat_purpose", ""),
+        scene_location=scene.get("location", "未设定"),
+        scene_weather=scene.get("weather", state.get("weather", "未知")),
+        scene_time_of_day=scene.get("time_of_day", "未设定"),
+        scene_mood=scene.get("mood", state.get("mood", "平静")),
         allowed_info=", ".join(bi.get("allowed_information", [])),
         forbidden_reveals=", ".join(bi.get("forbidden_reveals", [])),
         transitions=trans_text,
@@ -413,6 +588,7 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
                     temperature=0.7,
                     max_tokens=8000,
                     target_pool=available_ids,
+                    llm_model=llm_model,
                 )
             except StructuredOutputError as exc:
                 last_fail = f"structured_error:{exc}"
@@ -864,7 +1040,24 @@ def _sanitize_canonical_directive(
     """Normalize LLM drift so guard validation does not drop the whole directive."""
     result = dict(payload)
 
-    # Internal IDs only: 杨戬 → yangjian (display names stay user-facing elsewhere).
+    # When disclosure.required=true but resolve_gate.required=false (fast path),
+    # force resolve_gate.required=true. Physical actions with disclosure needs
+    # must go through RESOLVE. This also avoids the Guard rule that requires
+    # inline_effects.user_feedback on fast path (which the LLM no longer outputs).
+    resolve_gate = result.get("resolve_gate")
+    if isinstance(resolve_gate, dict) and resolve_gate.get("required") is not True:
+        user_turn = result.get("user_turn")
+        if isinstance(user_turn, dict):
+            disclosure = user_turn.get("disclosure")
+            if isinstance(disclosure, dict) and disclosure.get("required") is True:
+                resolve_gate = dict(resolve_gate)
+                resolve_gate["required"] = True
+                resolve_gate.setdefault(
+                    "reason", "escalated_from_fast_path: disclosure required"
+                )
+                result["resolve_gate"] = resolve_gate
+
+    # Internal IDs only: 杨戬 -> yangjian (display names stay user-facing elsewhere).
     tasks = result.get("tasks")
     if isinstance(tasks, list):
         normalized_tasks = []
@@ -1007,6 +1200,7 @@ def _canonical_directive_to_runtime(
         "selected_side_arc_id": canonical.get("selected_side_arc"),
         "narration_request": narration_request,
         "fallback_world_event": canonical.get("fallback_world_event"),
+        "scene_update": canonical.get("scene_update"),
     }
 
 

@@ -314,6 +314,18 @@ def advance_beat(state: dict[str, Any], target_beat_id: str, consequences: list[
     state["current_beat_id"] = target_beat_id
     state["beat_tick_counter"] = 0
 
+    # recovery 弧退出：推进到非 recovery 的 beat 时，清除 recovery 状态
+    if state.get("in_recovery"):
+        recovery_beats = state.get("_recovery_beats", [])
+        is_recovery_beat = any(
+            b.get("beat_id") == target_beat_id for b in recovery_beats
+        )
+        if not is_recovery_beat:
+            state["in_recovery"] = False
+            state["recovery_arc_id"] = None
+            state["_recovery_beats"] = []
+            state["recovery_rejoin_target"] = None
+
     # 保存分支后果
     if consequences:
         existing = state.setdefault("selected_branch_consequences", [])
@@ -421,3 +433,40 @@ def exit_recovery_arc(state: dict[str, Any]) -> None:
     state["recovery_rejoin_target"] = None
     state["beat_tick_counter"] = 0
     save_state(state)
+
+
+RECOVERY_MAX_TICKS = 2
+"""recovery 弧每个 beat 允许停留的最大 tick 数。
+
+recovery 弧是短期回归，目的是快速把用户引回主线。超过阈值后
+Room 自动推进，避免用户在 recovery 弧里无限循环。
+"""
+
+
+def recovery_next_beat(state: dict[str, Any]) -> str | None:
+    """返回 recovery 弧当前 beat 应推进到的下一个 beat（或 None）。
+
+    规则：
+    - 当前不在 recovery 弧 -> None
+    - 当前 beat 停留 tick 数 < RECOVERY_MAX_TICKS -> None（还没到推进时机）
+    - 否则返回当前 beat 的第一个 transition 目标；
+      若当前是弧内最后一个 beat，返回 rejoin_target（回到主线）
+    """
+    if not state.get("in_recovery"):
+        return None
+    tick_count = state.get("beat_tick_counter", 0)
+    if tick_count < RECOVERY_MAX_TICKS:
+        return None
+    current = state.get("current_beat_id", "")
+    beats = state.get("_recovery_beats", [])
+    for i, b in enumerate(beats):
+        if b.get("beat_id") != current:
+            continue
+        transitions = b.get("transitions", [])
+        if transitions:
+            return str(transitions[0].get("target_id", "")) or None
+        # 无 transition 的 recovery beat：最后一个则回主线，否则走下一个
+        if i + 1 < len(beats):
+            return str(beats[i + 1].get("beat_id", "")) or None
+        return state.get("recovery_rejoin_target")
+    return None

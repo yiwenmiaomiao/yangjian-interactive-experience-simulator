@@ -667,6 +667,10 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
     bi = dict(bi)
     bi["active_npcs"] = active_npcs
     bi["npc_registry"] = registry
+    bi["scene"] = state.get("scene", {})
+    # 注入 story_facts 摘要让所有 agent 可见
+    import story_facts as sf
+    bi["facts_summary"] = sf.get_facts_summary()
     bi["npc_profiles"] = [
         {
             "profile_id": profile.profile_id,
@@ -808,7 +812,133 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
     resolve_required = resolve_gate.get("required", True) is not False
     act_required = resolve_gate.get("act_required", True) is not False
 
-    # Phase 2: Actor Pool 行动。Narrator 不在此对象池中。
+    # ═══ Phase 2a: Narration 优先 ═══
+    # 有 narration 需求时先执行 narrator（旁白揭示环境），输出后再执行 actor。
+    # 旁白是用户的眼睛——用户行动后先看到环境，再看到角色反应。
+    narration_outputs: list[dict[str, Any]] = []
+    narration_spec = _select_narration_spec(directive, resolution=None)
+    # 场景变化强制旁白：用户执行物理行动（进入新地点、触碰物体等）时，
+    # 即使导演没设 narration.required，也必须触发旁白描述新环境。
+    if narration_spec is None:
+        user_turn = directive.get("user_turn") or {}
+        if user_turn.get("kind") == "physical_action":
+            narration_spec = {
+                "purpose": "scene_opening",
+                "timing": "before_dialogue",
+                "narration_type": "场景",
+                "visible_fact_ids": list(bi.get("allowed_information", [])),
+                "max_characters": 150,
+                "style_profile": "concise",
+                "brief": "用户执行了物理行动，描述用户此刻看到的新环境",
+                "scene_facts": [],
+            }
+            log_event(
+                lf_ctx,
+                "room.narration_forced_physical_action",
+                output_data={"user_turn_kind": "physical_action"},
+                level="WARNING",
+            )
+    # beat 切换后自动触发场景旁白（_beat_advanced 在后面才设置，这里先检查
+    # directive 是否携带场景切换标记；实际 beat 切换强制在 resolve 后处理）
+    if narration_spec is None and bi.get("_scene_changed"):
+        narration_spec = {
+            "purpose": "scene_opening",
+            "timing": "before_dialogue",
+            "narration_type": "场景",
+            "visible_fact_ids": list(bi.get("allowed_information", [])),
+            "max_characters": 150,
+            "style_profile": "concise",
+            "brief": "场景已切换，描述用户此刻看到的新环境",
+            "scene_facts": [],
+        }
+        log_event(
+            lf_ctx,
+            "room.narration_forced_beat_change",
+            output_data={"beat_id": bi.get("current_beat_id")},
+            level="WARNING",
+        )
+
+    if narration_spec:
+        with room_phase(
+            lf_ctx,
+            "room.phase4_narrate",
+            input_data={
+                "purpose": narration_spec.get("purpose"),
+                "timing": narration_spec.get("timing"),
+                "source": "pre_actor",
+            },
+        ):
+            # narration 在 actor 之前执行，没有 confirmed_events，
+            # 用 director 的 brief + scene_facts 构造合成事件作为素材
+            narration_events = _synthetic_confirmed_events_for_narration(
+                narration_spec, bi
+            )
+            request = contracts.NarrationRequest(
+                purpose=str(narration_spec.get("purpose", "visible_action")),
+                timing=str(narration_spec.get("timing", "after_dialogue")),
+                narration_type=str(narration_spec.get("narration_type", "旁白")),
+                visible_fact_ids=tuple(
+                    narration_spec.get("visible_fact_ids", ())
+                ),
+                max_characters=int(narration_spec.get("max_characters", 100)),
+                style_profile=str(
+                    narration_spec.get("style_profile", "concise")
+                ),
+                brief=str(narration_spec.get("brief", "")),
+                scene_facts=tuple(narration_spec.get("scene_facts", ())),
+            )
+            visible_facts = tuple(
+                contracts.FactRef(fact_id=fact_id, text=fact_id)
+                for fact_id in request.visible_fact_ids
+            )
+            narrator_request_message = contracts.new_message(
+                turn_id=turn_id,
+                story_id=str(bi.get("story_id", "story_1")),
+                beat_id=str(bi.get("current_beat_id", "")),
+                phase=contracts.Phase.NARRATE,
+                sender=room_ref,
+                recipient=contracts.AgentRef(
+                    agent_id="narrator",
+                    kind=contracts.AgentKind.NARRATOR,
+                ),
+                message_type="narrator.input",
+                correlation_id=direct_response.message_id,
+                payload=contracts.NarratorInput(
+                    narration_request=request,
+                    scene=bi.get("scene", {}),
+                    confirmed_events=tuple(narration_events),
+                    visible_facts=visible_facts,
+                    previous_published_messages=public_history_tuple,
+                ),
+            )
+            draft = contracts.to_dict(
+                narrator.handle_message(narrator_request_message).payload
+            )
+            narration = str(draft.get("text", ""))
+            if narration and not draft.get("contains_dialogue"):
+                narration_output = {
+                    "role": request.narration_type,
+                    "text": narration,
+                    "kind": "narration",
+                }
+                if request.timing == "before_dialogue":
+                    narration_outputs.insert(0, narration_output)
+                else:
+                    narration_outputs.append(narration_output)
+            log_event(
+                lf_ctx,
+                "room.narration_result",
+                output_data={
+                    "chars": len(narration),
+                    "accepted": bool(narration)
+                    and not draft.get("contains_dialogue"),
+                    "timing": request.timing,
+                    "source": "pre_actor",
+                },
+            )
+
+    # ═══ Phase 2b: Actor Pool 行动 ═══
+    # Narrator 不在此对象池中。
     actor_results: list[dict[str, Any]] = []
     if act_required:
         with room_phase(
@@ -901,11 +1031,17 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                         except Exception:
                             pass
                         # Inject checkpoint description if this beat has one
+                        # (RelationshipCheckpoint dataclass OR plain dict)
                         checkpoint = bi.get("relationship_checkpoint")
                         if checkpoint:
+                            checkpoint_desc = (
+                                checkpoint.get("description", "")
+                                if isinstance(checkpoint, dict)
+                                else getattr(checkpoint, "description", "")
+                            )
                             perception_text += (
                                 "\n\n## 本回合关系评估点\n"
-                                f"{checkpoint.get('description', '')}\n"
+                                f"{checkpoint_desc}\n"
                                 "请在 relationship_feedback 中输出你对用户本回合行为的感受变化"
                                 "（没有变化也填，changes 留空即可）"
                             )
@@ -935,7 +1071,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                             correlation_id=direct_response.message_id,
                             payload=contracts.YangJianTurnInput(
                                 task=task,
-                                scene={"id": bi.get("current_beat_id", "")},
+                                scene=bi.get("scene", {}),
                                 public_room_history=public_history_tuple,
                                 perception=perception,
                             ),
@@ -972,7 +1108,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                         turn_input = npc.build_structured_turn_input(
                             target,
                             task=task,
-                            scene={"id": bi.get("current_beat_id", "")},
+                            scene=bi.get("scene", {}),
                             public_room_history=public_history_tuple,
                             perception=visible_facts,
                         )
@@ -1193,6 +1329,10 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             },
         )
 
+    # narration 优先：旁白输出在 actor 输出之前
+    if narration_outputs:
+        outputs = list(narration_outputs) + list(outputs)
+
     result_by_id = {
         item.get("result_id"): item for item in actor_results
     }
@@ -1209,142 +1349,6 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                 event_id=decision.get("proposal_id", ""),
                 summary=str(decision.get("outcome_summary", "")),
             )
-
-    narration_spec = _select_narration_spec(directive, resolution)
-
-    # 场景变化强制旁白：用户执行物理行动（进入新地点、触碰物体等）时，
-    # 即使导演没设 narration.required，也必须触发旁白描述新环境。
-    # 旁白是用户的眼睛。
-    if narration_spec is None:
-        user_turn = directive.get("user_turn") or {}
-        if user_turn.get("kind") == "physical_action":
-            narration_spec = {
-                "purpose": "scene_opening",
-                "timing": "before_dialogue",
-                "narration_type": "场景",
-                "visible_fact_ids": list(bi.get("allowed_information", [])),
-                "max_characters": 150,
-                "style_profile": "concise",
-                "brief": "用户执行了物理行动，描述用户此刻看到的新环境",
-                "scene_facts": [],
-            }
-            log_event(
-                lf_ctx,
-                "room.narration_forced_physical_action",
-                output_data={"user_turn_kind": "physical_action"},
-                level="WARNING",
-            )
-
-    # beat 切换后自动触发场景旁白
-    if narration_spec is None and _beat_advanced:
-        narration_spec = {
-            "purpose": "scene_opening",
-            "timing": "before_dialogue",
-            "narration_type": "场景",
-            "visible_fact_ids": list(bi.get("allowed_information", [])),
-            "max_characters": 150,
-            "style_profile": "concise",
-            "brief": "场景已切换，描述用户此刻看到的新环境",
-            "scene_facts": [],
-        }
-        log_event(
-            lf_ctx,
-            "room.narration_forced_beat_change",
-            output_data={"beat_id": bi.get("current_beat_id")},
-            level="WARNING",
-        )
-
-    if narration_spec:
-        with room_phase(
-            lf_ctx,
-            "room.phase4_narrate",
-            input_data={
-                "purpose": narration_spec.get("purpose"),
-                "timing": narration_spec.get("timing"),
-                "confirmed_event_count": len(confirmed_events),
-            },
-        ):
-            narration_events = list(confirmed_events)
-            if not narration_events:
-                narration_events = _synthetic_confirmed_events_for_narration(
-                    narration_spec
-                )
-            request = contracts.NarrationRequest(
-                purpose=str(narration_spec.get("purpose", "visible_action")),
-                timing=str(narration_spec.get("timing", "after_dialogue")),
-                narration_type=str(narration_spec.get("narration_type", "旁白")),
-                visible_fact_ids=tuple(
-                    narration_spec.get("visible_fact_ids", ())
-                ),
-                max_characters=int(narration_spec.get("max_characters", 100)),
-                style_profile=str(
-                    narration_spec.get("style_profile", "concise")
-                ),
-                brief=str(narration_spec.get("brief", "")),
-                scene_facts=tuple(narration_spec.get("scene_facts", ())),
-            )
-            visible_facts = tuple(
-                contracts.FactRef(fact_id=fact_id, text=fact_id)
-                for fact_id in request.visible_fact_ids
-            )
-            narrator_request_message = contracts.new_message(
-                turn_id=turn_id,
-                story_id=str(bi.get("story_id", "story_1")),
-                beat_id=str(bi.get("current_beat_id", "")),
-                phase=contracts.Phase.NARRATE,
-                sender=room_ref,
-                recipient=contracts.AgentRef(
-                    agent_id="narrator",
-                    kind=contracts.AgentKind.NARRATOR,
-                ),
-                message_type="narrator.input",
-                correlation_id=(
-                    resolve_response.message_id
-                    if resolve_response is not None
-                    else direct_response.message_id
-                ),
-                payload=contracts.NarratorInput(
-                    narration_request=request,
-                    scene={"id": bi.get("current_beat_id", "")},
-                    confirmed_events=tuple(narration_events),
-                    visible_facts=visible_facts,
-                    previous_published_messages=public_history_tuple,
-                ),
-            )
-            draft = contracts.to_dict(
-                narrator.handle_message(narrator_request_message).payload
-            )
-            narration = str(draft.get("text", ""))
-            if (
-                narration
-                and not draft.get("contains_dialogue")
-                and not _contains_forbidden(narration, forbidden_fragments)
-            ):
-                narration_output = {
-                    "role": request.narration_type,
-                    "text": narration,
-                    "kind": "narration",
-                }
-                if request.timing == "before_dialogue":
-                    outputs.insert(0, narration_output)
-                else:
-                    outputs.append(narration_output)
-            log_event(
-                lf_ctx,
-                "room.narration_result",
-                output_data={
-                    "chars": len(narration),
-                    "accepted": bool(narration)
-                    and not draft.get("contains_dialogue"),
-                    "timing": request.timing,
-                },
-            )
-    else:
-        log_event(
-            lf_ctx,
-            "room.narration_skipped",
-            output_data={"confirmed_event_count": len(confirmed_events)},
-        )
 
     # ── 钩子兜底：仅在异常情况下触发 ──
     # 正常流程中钩子由导演在 DIRECT 阶段安排，代码不干预。
@@ -1391,13 +1395,17 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                 confirmed_event_ids=tuple(o.get("confirmed_event_ids", ())),
             )
 
-    # 更新公共事实
+    # 应用 scene_update（来自 director directive）
     import story_facts as sf
-    directive_scene = directive.get("current_beat", "")
-    if directive_scene:
-        f = sf.load_facts()
-        f["current_scene"] = directive_scene
-        sf.save_facts(f)
+    scene_update = directive.get("scene_update")
+    if scene_update and isinstance(scene_update, dict):
+        changes = {}
+        for k in ("location", "weather", "time_of_day", "mood"):
+            v = scene_update.get(k)
+            if v is not None:
+                changes[k] = v
+        if changes:
+            state = state_manager.apply_changes(state, {"scene_update": changes})
 
     # 应用 resolution 中的状态变更
     for change in resolution.get("state_changes", []):
@@ -1415,6 +1423,17 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             elif key.startswith("character_"):
                 character = key.replace("character_", "")
                 sf.set_character_state(character, str(value))
+
+    # 应用 resolution 中的 scene_update
+    resolve_scene_update = resolution.get("scene_update")
+    if resolve_scene_update and isinstance(resolve_scene_update, dict):
+        resolve_changes = {}
+        for k in ("location", "weather", "time_of_day", "mood"):
+            v = resolve_scene_update.get(k)
+            if v is not None:
+                resolve_changes[k] = v
+        if resolve_changes:
+            state = state_manager.apply_changes(state, {"scene_update": resolve_changes})
 
     # 推进 beat（若有）
     next_beat = resolution.get("next_beat")
@@ -1486,6 +1505,31 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
     else:
         ss.clear_deviation(ss_state)
 
+    # 两阶段模式也递增 beat tick（legacy 在 tick() 里递增，这里补上）
+    if not _beat_advanced and ss_state.get("status") == "active":
+        ss.increment_beat_tick(ss_state)
+
+    # recovery 弧自动推进：停留超阈值时 Room 强制推进，
+    # 避免用户在回归弧里无限循环（fast_direct 无 RESOLVE 的 next_beat）
+    if not _beat_advanced and ss_state.get("in_recovery"):
+        recovery_target = ss.recovery_next_beat(ss.load_state())
+        if recovery_target:
+            ss.advance_beat(ss_state, recovery_target)
+            # 更新 director 缓存
+            bi = ss.get_current_beat_info(ss.load_state())
+            director.set_story_context(bi)
+            _beat_advanced = True
+            log_event(
+                lf_ctx,
+                "room.recovery_auto_advance",
+                output_data={
+                    "target": recovery_target,
+                    "in_recovery": bool(ss_state.get("in_recovery")),
+                    "tick_count": ss_state.get("beat_tick_counter", 0),
+                },
+                level="WARNING",
+            )
+
     # 限制日志长度
     if len(state.get("event_log", [])) > 500:
         state["event_log"] = state["event_log"][-500:]
@@ -1499,7 +1543,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
         pass
 
     decision_out = {
-        "scene": directive.get("current_beat", ""),
+        "scene": state.get("scene", {}),
         "order": order,
         "outcome": resolution.get("next_beat", ""),
     }
@@ -1621,6 +1665,7 @@ def _confirmed_events_from_user_outcome(
 
 def _synthetic_confirmed_events_for_narration(
     narration_spec: dict[str, Any],
+    bi: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     brief = str(narration_spec.get("brief", "")).strip()
@@ -1643,12 +1688,35 @@ def _synthetic_confirmed_events_for_narration(
             "participants": [],
             "fact_ids": [],
         })
+    # 兜底：无 brief/scene_facts 时用 beat 目的作为叙事锚点，
+    # 保证 narrator 始终有素材可写（旁白是用户的眼睛，不能空转）
+    if not events and bi:
+        beat_purpose = str(bi.get("beat_purpose", "")).strip()
+        if beat_purpose:
+            events.append({
+                "event_id": "confirmed_director_beat_purpose",
+                "event_type": "scene_anchor",
+                "summary": beat_purpose[:150],
+                "participants": [],
+                "fact_ids": [],
+            })
+        scene = str(bi.get("current_scene", "")).strip()
+        if not scene:
+            scene = str(bi.get("current_beat_id", "")).strip()
+        if scene:
+            events.append({
+                "event_id": "confirmed_director_scene_id",
+                "event_type": "scene_anchor",
+                "summary": f"用户此刻位于：{scene}",
+                "participants": [],
+                "fact_ids": [],
+            })
     return events
 
 
 def _select_narration_spec(
     directive: dict[str, Any],
-    resolution: dict[str, Any],
+    resolution: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     inline_feedback = (directive.get("inline_effects") or {}).get("user_feedback")
     if isinstance(inline_feedback, Mapping):
@@ -1664,7 +1732,7 @@ def _select_narration_spec(
                 "style_profile": "concise",
             }
 
-    user_outcome = resolution.get("user_outcome")
+    user_outcome = (resolution or {}).get("user_outcome")
     if isinstance(user_outcome, Mapping):
         presentation = user_outcome.get("presentation")
         if isinstance(presentation, Mapping) and presentation.get("required"):
@@ -1683,6 +1751,7 @@ def _select_narration_spec(
         return {
             "purpose": narration_request.get("purpose", "visible_action"),
             "timing": narration_request.get("timing", "after_dialogue"),
+            "narration_type": narration_request.get("narration_type", "旁白"),
             "visible_fact_ids": list(
                 narration_request.get("visible_fact_ids", [])
             ),

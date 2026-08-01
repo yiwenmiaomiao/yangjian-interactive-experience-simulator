@@ -474,12 +474,16 @@ def act(npc_name: str, director_decision: dict[str, Any], perception: str = "") 
 
     # 无结构化任务时退回到传统模式（从 decision 获取上下文）
     event_context = director_decision.get("outcome", "无")
-    scene = director_decision.get("scene", "")
+    scene = director_decision.get("scene", {})
+    if isinstance(scene, dict):
+        scene_str = scene.get("location", "") or str(scene)
+    else:
+        scene_str = str(scene)
     goals = director_decision.get("goals", {})
 
     # 构造一个最简单的 task
     task = {
-        "objective": f"根据场景 {scene} 和事件 {event_context} 行动",
+        "objective": f"根据场景 {scene_str} 和事件 {event_context} 行动",
         "allowed_actions": ["speak", "act"],
         "must_not": ["break_character", "reveal_secrets"],
         "visible_events": [event_context],

@@ -39,11 +39,14 @@ NPC_PROPOSAL_SCHEMA = NPCProposalOutput.model_json_schema()
 NPC_TURN_RESULT_SCHEMA = NPCTurnOutput.model_json_schema()
 
 
-def build_npc_turn_input(context: NPCTurnContext) -> dict[str, Any]:
+def build_npc_turn_input(context: NPCTurnContext, scene: dict | None = None) -> dict[str, Any]:
     """Build the only dynamic context an NPC Agent should receive.
 
     ``must_not_know`` is deliberately omitted: its entries may themselves be
     spoilers. The manager filters facts before this function is called.
+
+    ``scene`` is the current world scene dict (location, weather, etc.)
+    injected by Room so the NPC knows where it is.
     """
 
     profile = context.profile
@@ -64,6 +67,10 @@ def build_npc_turn_input(context: NPCTurnContext) -> dict[str, Any]:
         },
         "npc_memory": asdict(context.memory),
         "current_scene": {
+            "location": (scene or {}).get("location", ""),
+            "weather": (scene or {}).get("weather", ""),
+            "time_of_day": (scene or {}).get("time_of_day", ""),
+            "mood": (scene or {}).get("mood", ""),
             "visible_events": list(context.visible_events),
             "known_facts": list(context.known_facts),
         },

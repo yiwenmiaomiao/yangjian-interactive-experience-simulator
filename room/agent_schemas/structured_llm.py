@@ -101,11 +101,15 @@ def call_structured(
     max_tokens: int = 8000,
     max_retries: int = 2,
     target_pool: Sequence[str] | None = None,
+    llm_model: str | None = None,
 ) -> T:
     """Call the LLM and validate the response with a Pydantic output model.
 
     Schema hint is appended to the first user message (not system prompt)
     to reduce prefill cost — system prompt stays lean and cacheable.
+
+    ``llm_model`` overrides the default DeepSeek reasoning model. Pass a
+    non-reasoning model (e.g. deepseek-chat) to avoid slow reasoning_tokens.
     """
     response_format, schema_hint = schema_to_json_object_format(
         model, target_pool=target_pool
@@ -129,6 +133,7 @@ def call_structured(
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=response_format,
+            model=llm_model,
         )
         if raw.startswith("【"):
             # Truncation (finish_reason=length) is not recoverable by retrying

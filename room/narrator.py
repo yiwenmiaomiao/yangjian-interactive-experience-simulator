@@ -62,7 +62,7 @@ INPUT_TEMPLATE = """## narration_task
 
 {task}
 
-## 场景
+## 当前场景
 
 {scene}
 
@@ -82,7 +82,28 @@ INPUT_TEMPLATE = """## narration_task
 
 {max_chars}
 
-请根据 narration_task 写一段旁白。无话可说时直接返回空字符串。"""
+请根据 narration_task 写一段旁白。无话可说时直接返回空字符串。
+重要：你描写的地点必须与"当前场景"中的地理位置一致，不得凭空发明新场所。"""
+
+
+def _format_scene(scene: dict) -> str:
+    """Format scene dict into human-readable string for LLM prompt."""
+    if not isinstance(scene, dict):
+        return str(scene) if scene else "未设定"
+    location = scene.get("location", "")
+    weather = scene.get("weather", "")
+    time_of_day = scene.get("time_of_day", "")
+    mood = scene.get("mood", "")
+    parts = []
+    if location:
+        parts.append(f"地理位置：{location}")
+    if weather:
+        parts.append(f"天气：{weather}")
+    if time_of_day:
+        parts.append(f"时间：{time_of_day}")
+    if mood:
+        parts.append(f"氛围：{mood}")
+    return "\n".join(parts) if parts else "未设定"
 
 
 def _build_narration_task(request: contracts.NarrationRequest) -> str:
@@ -117,7 +138,7 @@ def draft(turn_input: contracts.NarratorInput) -> dict:
         )
     prompt = INPUT_TEMPLATE.format(
         task=_build_narration_task(request),
-        scene=str(turn_input.scene.get("name") or turn_input.scene.get("id") or ""),
+        scene=_format_scene(turn_input.scene),
         outcome="\n".join(confirmed),
         event_context="\n".join(
             f"{message.role}: {message.text}"
@@ -135,7 +156,8 @@ def draft(turn_input: contracts.NarratorInput) -> dict:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=800,
+            max_tokens=int(os.environ.get("YANGJIAN_NARRATOR_MAX_TOKENS", "8000")),
+            llm_model=os.environ.get("YANGJIAN_NARRATOR_LLM_MODEL") or None,
         )
         text = output.text.strip()
     except StructuredOutputError:
@@ -200,7 +222,7 @@ def speak(director_decision, state, max_chars: int = 200):
     - director 要求旁白
     否则返回空字符串。
     """
-    scene = director_decision.get("scene", "")
+    scene = director_decision.get("scene", {})
     mood = director_decision.get("mood", "")
     outcome = director_decision.get("outcome", "")
     facts_summary = director_decision.get("facts_summary", "")
@@ -212,15 +234,16 @@ def speak(director_decision, state, max_chars: int = 200):
 
     # 去掉"旁白"为唯一角色时仍输出前排顺序检查
     # 但如果只有"旁白"和"用户"，确实需要旁白铺场景
-    if order == ["旁白", "用户"] and not scene and not outcome:
+    scene_location = scene.get("location", "") if isinstance(scene, dict) else str(scene)
+    if order == ["旁白", "用户"] and not scene_location and not outcome:
         # 什么新东西都没有，不输出
         pass
 
     # 提取旁白任务
     # 当场景有变化、需要引入新地点或时间跳跃时，tell narrator
     task_parts = []
-    if scene:
-        task_parts.append(f"当前场景：{scene}")
+    if scene_location:
+        task_parts.append(f"当前场景：{_format_scene(scene) if isinstance(scene, dict) else scene_location}")
     if mood:
         task_parts.append(f"氛围基调：{mood}")
     if outcome:
@@ -235,7 +258,7 @@ def speak(director_decision, state, max_chars: int = 200):
 
     prompt = INPUT_TEMPLATE.format(
         task="\n".join(task_parts),
-        scene=scene or "无特别变化",
+        scene=_format_scene(scene) if isinstance(scene, dict) else str(scene) if scene else "无特别变化",
         outcome=outcome or "无",
         event_context=event_context or "无此前事件",
         facts_summary=facts_summary or "无",
@@ -246,7 +269,8 @@ def speak(director_decision, state, max_chars: int = 200):
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,  # 极低温度，严格遵循约束
-        max_tokens=800,
+        max_tokens=int(os.environ.get("YANGJIAN_NARRATOR_MAX_TOKENS", "8000")),
+        model=os.environ.get("YANGJIAN_NARRATOR_LLM_MODEL") or None,
     )
 
     # 如果模型返回空或只返回空字符串，返回空

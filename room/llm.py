@@ -6,16 +6,21 @@ LLM 调用封装
 import os, json, requests, time
 from contextvars import ContextVar
 
-# 优先环境变量，其次从 project .env 读取
+# ── .env 加载：将项目 .env 中的变量注入 os.environ（不覆盖已有值） ──
+_ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+if os.path.exists(_ENV_PATH):
+    for _line in open(_ENV_PATH, encoding="utf-8"):
+        _line = _line.strip()
+        if not _line or _line.startswith("#") or "=" not in _line:
+            continue
+        _k, _v = _line.split("=", 1)
+        _k = _k.strip()
+        _v = _v.strip().strip('"').strip("'")
+        if _k and _k not in os.environ:
+            os.environ[_k] = _v
+
+# 优先环境变量（已含 .env 加载的），其次硬编码 fallback
 API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-if not API_KEY:
-    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
-    if os.path.exists(env_path):
-        for line in open(env_path):
-            line = line.strip()
-            if line.startswith("DEEPSEEK_API_KEY="):
-                API_KEY = line.split("=", 1)[1]
-                break
 
 API_URL = "https://api.deepseek.com/v1/chat/completions"
 MODEL = "deepseek-v4-flash"
@@ -121,6 +126,7 @@ def call(
     max_tokens=8000,
     agent_id: str = "",
     response_format=None,
+    model: str | None = None,
 ):
     """调用 LLM，返回文本响应。
 
@@ -128,6 +134,8 @@ def call(
         agent_id: 用于 Langfuse 日志的 agent 名称
         response_format: 可选 JSON 模式。``json_schema`` is auto-converted
             to ``json_object`` for DeepSeek compatibility.
+        model: 可选模型覆盖。None 时用默认 MODEL（deepseek-v4-flash）。
+            传非推理模型（如 deepseek-chat）可避免 reasoning_tokens 拖慢响应。
     """
     if not API_KEY:
         return "【错误：DEEPSEEK_API_KEY 未设置】"
@@ -135,8 +143,9 @@ def call(
     full_messages = [{"role": "system", "content": system}]
     full_messages.extend(messages)
 
+    effective_model = model or MODEL
     payload = {
-        "model": MODEL,
+        "model": effective_model,
         "messages": full_messages,
         "temperature": temperature,
         "max_tokens": max_tokens,

@@ -71,6 +71,12 @@ def handle_message(
         room_phase,
     )
 
+    # # 前缀 = 提示请求：不走 Room 主循环，直接生成方向提示
+    if user_message and str(user_message).strip().startswith("#"):
+        import hint as hint_mod
+        result = hint_mod.generate_hint(user_id=user_id, thread_id=thread_id)
+        return result
+
     token = runtime_context.set_identity(user_id, thread_id)
     owns_trace = False
     if lf_ctx is None:

@@ -15,9 +15,13 @@ STATE_PATH = os.path.join(PROFILE_DIR, "world_state.json")
 def default_state():
     return {
         "tick": 0,
-        "weather": "晴",
-        "mood": "平静",
         "world_day": 1,
+        "scene": {
+            "location": "",
+            "weather": "晴",
+            "time_of_day": "",
+            "mood": "平静",
+        },
         "stories": {},
         "event_log": [],
         "permissions": {
@@ -62,14 +66,19 @@ def get_perception(role_key, state, extra_context=None):
     else:
         can_perceive = set(raw)
     
+    scene = state.get("scene", {})
     parts = []
     
     if "weather" in can_perceive:
-        parts.append(f"天气：{state.get('weather', '未知')}")
+        parts.append(f"天气：{scene.get('weather', state.get('weather', '未知'))}")
     
     if "time" in can_perceive:
         day = state.get("world_day", 1)
-        parts.append(f"第{day}天")
+        tod = scene.get("time_of_day", "")
+        time_str = f"第{day}天"
+        if tod:
+            time_str += f"·{tod}"
+        parts.append(time_str)
     
     if "ambient_events" in can_perceive:
         event_log = state.get("event_log", [])
@@ -79,7 +88,12 @@ def get_perception(role_key, state, extra_context=None):
                 parts.append(f"  · {e}")
     
     if role_key == "yangjian":
-        parts.append(f"氛围：{state.get('mood', 'neutral')}")
+        parts.append(f"氛围：{scene.get('mood', state.get('mood', 'neutral'))}")
+    
+    # 地理场景所有角色都可见
+    location = scene.get("location", "")
+    if location:
+        parts.insert(0, f"当前地点：{location}")
     
     if extra_context:
         parts.append("")
@@ -95,14 +109,24 @@ def apply_changes(state, changes):
     """
     state = copy.deepcopy(state)
     
+    scene = state.setdefault("scene", {})
+    
+    # 兼容旧的 weather/mood/world_day 顶层字段
     if "weather" in changes:
-        state["weather"] = changes["weather"]
+        scene["weather"] = changes["weather"]
     if "current_weather" in changes:
-        state["weather"] = changes["current_weather"]
+        scene["weather"] = changes["current_weather"]
     if "mood" in changes:
-        state["mood"] = changes["mood"]
+        scene["mood"] = changes["mood"]
     if "world_day" in changes:
         state["world_day"] = changes["world_day"]
+    
+    # scene_update: 合并非 null 字段
+    scene_update = changes.get("scene_update")
+    if isinstance(scene_update, dict):
+        for k, v in scene_update.items():
+            if v is not None:
+                scene[k] = v
     
     story_changes = changes.get("stories", {})
     for story_key, story_data in story_changes.items():

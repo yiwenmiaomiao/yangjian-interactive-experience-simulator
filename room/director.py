@@ -227,7 +227,6 @@ Beat 目标：{beat_goal}
 Actor 显示名对照（仅供理解，禁止写入 target）：{actor_display_map}
 当前 Beat 的 NPC Profile（仅 id，完整档案在 NPC Manager）：{npc_profiles}
 已有故事事实：{consequences}
-连续偏离次数：{deviation_count}
 {recovery_note}
 当前杨戬与用户关系：{relationship_summary}
 
@@ -581,7 +580,6 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
             bi.get("npc_profiles", []), ensure_ascii=False
         ),
         consequences=", ".join(bi.get("consequences", [])),
-        deviation_count=bi.get("beat_tick_counter", 0),
         recovery_note="",
         relationship_summary=_get_relationship_summary(),
         user_message_display=user_msg_display,
@@ -701,7 +699,7 @@ def _resolve_story(
         "- accept_abstention：接受角色本回合不行动，但你仍需安排其他发展\n"
         "- user_outcome：仅当 user_turn.disclosure.required=true 时 applies=true\n"
         "- user_outcome.outcome_summary 写用户感知到的事实（如\"盒中是玉符\"），不写文学描写\n"
-        "- revealed_fact_ids 只能来自 allowed_information\n"
+        "- revealed_fact_ids 必须从上方\"允许透露的信息\"列表中逐条原样复制，不能自己编造\n"
         "- presentation.required=true 表示需要旁白向用户呈现该结果\n"
         "- state_changes 只是提案，Room 决定是否生效\n"
         "- next_beat 只能填已解锁的 beat ID，否则 null\n"
@@ -718,14 +716,31 @@ def _resolve_story(
             "用户回合分类：\n"
             + json.dumps(user_turn, ensure_ascii=False, indent=2)
         )
+    allowed_info = bi.get("allowed_information", [])
     situation_parts.append(
-        "允许透露的信息："
-        + ", ".join(bi.get("allowed_information", []))
+        "允许透露的信息（revealed_fact_ids 只能从这里选）：\n"
+        + "\n".join(f"  - {info}" for info in allowed_info)
+        if allowed_info
+        else "允许透露的信息：无"
     )
-    situation_parts.append(
-        "本回合的角色提议：\n"
-        + json.dumps(proposals, ensure_ascii=False, indent=2)
-    )
+    # 精简角色提议：只传关键字段，不传完整 JSON
+    proposal_lines = []
+    for p in proposals:
+        agent_id = p.get("agent_id", "?")
+        proposal = p.get("proposal") or {}
+        intent = proposal.get("intent", "")
+        dialogue = (proposal.get("dialogue") or {}).get("text", "")
+        action = (proposal.get("action") or {}).get("description", "")
+        effects = proposal.get("proposed_effects", [])
+        parts = [f"目标：{intent}"]
+        if dialogue:
+            parts.append(f"对白：{dialogue}")
+        if action:
+            parts.append(f"行动：{action}")
+        if effects:
+            parts.append(f"提议：{'，'.join(effects)}")
+        proposal_lines.append(f"{agent_id}--{'；'.join(parts)}")
+    situation_parts.append("本回合的角色提议：\n" + "\n".join(proposal_lines))
     situation = "\n\n".join(situation_parts)
 
     for _ in range(3):
@@ -1342,6 +1357,18 @@ def _normalize_resolution(
         ]
     else:
         result["state_changes"] = []
+    # Drop LLM-invented fact IDs from user_outcome.revealed_fact_ids.
+    # Only keep IDs that are in allowed_information (same logic as state_changes).
+    allowed_info = set(bi.get("allowed_information", []))
+    user_outcome = result.get("user_outcome")
+    if isinstance(user_outcome, dict):
+        revealed = user_outcome.get("revealed_fact_ids", [])
+        if isinstance(revealed, list):
+            user_outcome = dict(user_outcome)
+            user_outcome["revealed_fact_ids"] = [
+                f for f in revealed if str(f) in allowed_info
+            ]
+            result["user_outcome"] = user_outcome
     result.setdefault("next_beat", None)
     result.setdefault("goal_met", False)
     result.setdefault("sub_goal_met", False)

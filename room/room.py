@@ -142,7 +142,6 @@ def story_plan_status() -> str:
         "completed_beats": len(state.get("completed_beats", [])),
         "flags": state.get("flags", {}),
         "in_recovery": state.get("in_recovery", False),
-        "deviation_count": state.get("consecutive_deviation", 0),
     }, ensure_ascii=False)
 
 
@@ -741,6 +740,35 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             "allowed_information_count": len(bi.get("allowed_information", [])),
             "user_message": user_message,
             "source": source,
+        },
+    )
+    # room.status：当前状态机全量参数快照
+    scene = state.get("scene", {})
+    log_event(
+        lf_ctx,
+        "room.status",
+        output_data={
+            "beat_id": bi.get("current_beat_id"),
+            "beat_purpose": bi.get("beat_purpose", ""),
+            "beat_goal": bi.get("beat_goal", ""),
+            "beat_max_turns": bi.get("beat_max_turns", 6),
+            "beat_tick_counter": bi.get("beat_tick_counter", 0),
+            "in_recovery": ss_state.get("in_recovery", False),
+            "recovery_arc_id": ss_state.get("recovery_arc_id"),
+            "recovery_rejoin_target": ss_state.get("recovery_rejoin_target"),
+            "completed_beats": ss_state.get("completed_beats", []),
+            "main_progress": ss_state.get("main_progress", 0.0),
+            "scene_location": scene.get("location", ""),
+            "scene_weather": scene.get("weather", ""),
+            "scene_time_of_day": scene.get("time_of_day", ""),
+            "scene_mood": scene.get("mood", ""),
+            "allowed_information": bi.get("allowed_information", []),
+            "forbidden_reveals": bi.get("forbidden_reveals", []),
+            "available_transitions": [
+                {"target_id": t.get("target_id"), "consequences": t.get("preserved_consequences")}
+                for t in bi.get("available_transitions", [])
+            ],
+            "relationship": ss_state.get("relationship", {}),
         },
     )
 

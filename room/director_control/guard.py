@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -71,7 +72,16 @@ def validate_directive(
             task_ids.add(task_id)
 
         target = task.get("target")
-        if target not in context.available_agents:
+        # 增加 target 字符串判定与非空校验
+        if not isinstance(target, str) or not target.strip():
+            issues.append(
+                _issue(
+                    "TARGET_MISSING",
+                    "target is required and must be a valid string",
+                    location,
+                )
+            )
+        elif target not in context.available_agents:
             issues.append(
                 _issue(
                     "TARGET_NOT_AVAILABLE",
@@ -81,10 +91,9 @@ def validate_directive(
             )
 
         source = task.get("source_reference")
-        # 只要不是空字符串就通过（LLM 自由生成的 source_reference 无法精确匹配）
-        if source and source not in context.allowed_source_references:
-            # 只有明确已知的 source 才校验，自由生成的不拦
-            if source in ("m1", "m2", "m3", "m4") or source.startswith("side_"):
+        # 只要不是空字符串就通过，放行自由生成的字符串，仅使用正则表达式拦截确定格式的节点ID
+        if isinstance(source, str) and source and source not in context.allowed_source_references:
+            if re.match(r"^m\d+$", source) or source.startswith("side_"):
                 issues.append(
                     _issue(
                         "SOURCE_NOT_ALLOWED",
@@ -119,8 +128,8 @@ def validate_directive(
             issues.append(
                 _issue("OBJECTIVE_MISSING", "objective is required", location)
             )
-        elif target:
-            signature = task_signature(str(target), objective)
+        elif isinstance(target, str) and target.strip():
+            signature = task_signature(target, objective)
             if context.recent_task_signatures.count(signature) >= 2:
                 issues.append(
                     _issue(
@@ -206,7 +215,8 @@ def validate_directive(
     _check_resolve_gate(payload, context, issues)
 
     side_arc = payload.get("selected_side_arc")
-    if side_arc is not None and side_arc not in context.unlocked_side_arcs:
+    # 使用真值判断过滤空字符串
+    if side_arc and side_arc not in context.unlocked_side_arcs:
         issues.append(
             _issue(
                 "SIDE_ARC_LOCKED",
@@ -293,15 +303,7 @@ def validate_resolution(
                 )
             )
 
-    missing = context.proposal_ids - seen
-    if missing:
-        issues.append(
-            _issue(
-                "PROPOSALS_UNDECIDED",
-                f"all proposals require a decision: {sorted(missing)}",
-                "decisions",
-            )
-        )
+    # 移除了因为漏填提案 (PROPOSALS_UNDECIDED) 而直接打回 LLM 的校验逻辑，允许业务层做默认处理
 
     state_changes = payload.get("state_changes")
     if not isinstance(state_changes, list):
@@ -335,7 +337,8 @@ def validate_resolution(
                 )
 
     next_beat = payload.get("next_beat")
-    if next_beat is not None and next_beat not in context.unlocked_next_beats:
+    # 使用真值判断过滤空字符串
+    if next_beat and next_beat not in context.unlocked_next_beats:
         issues.append(
             _issue(
                 "NEXT_BEAT_LOCKED",
@@ -402,7 +405,6 @@ def _check_common(
                 "mode",
             )
         )
-    # chapter 和 beat 由系统预处理修正，不再校验 LLM 输出
 
 
 def _check_narration(
@@ -485,16 +487,8 @@ def _check_resolve_gate(
     resolve_required = resolve_gate.get("required") is True
     state_operations = inline_effects.get("state_operations", [])
     user_feedback = inline_effects.get("user_feedback")
-    has_inline = bool(state_operations) or isinstance(user_feedback, Mapping)
-
-    if resolve_required and has_inline:
-        issues.append(
-            _issue(
-                "INLINE_EFFECTS_FORBIDDEN",
-                "inline_effects must be empty when resolve_gate.required is true",
-                "inline_effects",
-            )
-        )
+    
+    # 彻底删除了 INLINE_EFFECTS_FORBIDDEN 的校验，允许模型在需要解决时自由提供 inline_effects，业务层可自行忽略
 
     disclosure_required = False
     if isinstance(user_turn, Mapping):

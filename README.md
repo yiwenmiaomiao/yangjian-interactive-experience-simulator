@@ -481,7 +481,43 @@ Narrator 的 prompt 展示结构化场景（地理/天气/时间/氛围），并
 | `room/npc_manager/prompting.py` | NPC turn input 注入 scene |
 | `room/story_facts.py` | `get_facts_summary()` 读取 scene |
 
-## 16. 兼容策略
+## 16. Beat 推进与 Recovery 机制
+
+### Beat Goal / Max Turns
+
+每个 beat 有 `goal`（用户需达成的目标）和 `max_turns`（建议最大轮次）。这些字段定义在 `StoryPlan` 的 `StoryBeat` 中，运行时由 `story_state.get_current_beat_info()` 读取并注入 director context。
+
+| 字段 | 来源 | 作用 |
+|---|---|---|
+| `goal` | StoryPlan `StoryBeat.goal` | 告诉 director 当前 beat 的具体目标，如"用户发现密室和古盒" |
+| `max_turns` | StoryPlan `StoryBeat.max_turns` | beat 停留上限，超过后触发 recovery |
+
+director 每回合在 RESOLVE 阶段判断 `goal_met`（目标是否达成），如果达成则输出 `next_beat` 推进。Room 检查 `beat_tick_counter >= max_turns` 且 goal 未达成时触发 recovery。
+
+### Recovery 弧
+
+当 beat 停留超过 `max_turns` 轮但 goal 未达成时，Room 调用 `_trigger_recovery()` 生成一个短回归弧（1 个 beat），自然地把用户引向下一个剧情节点：
+
+```
+beat tick >= max_turns 且 goal_met=false
+  -> _trigger_recovery() 调用 LLM 生成 recovery beat（含 sub_goal）
+  -> enter_recovery_arc()：进入 recovery 模式
+  -> recovery beat 也有 max_turns（默认 4）
+  -> recovery max_turns 到了仍未达成 -> exit_recovery_arc() + narrator 过渡剧情
+  -> advance_beat() 到 rejoin_target（回到主线下一 beat）
+```
+
+recovery 弧的 beat 存在 `story_state._recovery_beats` 中，`get_current_beat_info()` 在 recovery 模式下优先返回 recovery beat 的信息。
+
+### Recovery 自动推进
+
+recovery 弧内每个 beat 停留超过 `RECOVERY_MAX_TICKS`（默认 2）轮时，Room 自动推进到下一个 recovery beat 或回到主线（`recovery_rejoin_target`），避免用户在回归弧里无限循环。
+
+### 旧 Deviation 逻辑（已删除）
+
+旧版本使用 `deviation_count` / `consecutive_deviation` / `record_deviation` / `clear_deviation` 检测用户偏离主线行为。该逻辑已被 beat goal/max_turns + recovery 替代，相关字段和函数已从 `story_state.py`、`room.py`、`director.py` 中完全删除。
+
+## 17. 兼容策略
 
 当前仍保留以下旧接口，供现有 Hermes/网关代码逐步迁移：
 
@@ -495,7 +531,7 @@ Director LLM 与 Guard 现在共用 canonical `DIRECTIVE_SCHEMA` / `RESOLUTION_S
 
 新代码不得继续依赖这些兼容接口。兼容逻辑只能存在于边界层，不能重新进入 Room 核心流程。
 
-## 17. 验证
+## 18. 验证
 
 在项目根目录运行（Windows PowerShell）：
 

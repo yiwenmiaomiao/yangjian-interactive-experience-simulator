@@ -65,25 +65,28 @@ def _format_public_message(message: Any) -> str:
     return f"{role}：{text}"
 
 
+def _summarize_history(messages: list, recent_count: int = 3) -> str:
+    """精简公开消息：最近 N 条原文 + 之前的摘要。"""
+    formatted = []
+    for message in messages:
+        line = _format_public_message(message)
+        if line:
+            formatted.append(line)
+    if len(formatted) <= recent_count:
+        return "\n".join(formatted) if formatted else "（暂无）"
+    recent = formatted[-recent_count:]
+    older = formatted[:-recent_count]
+    # 摘要：只保留角色名和消息数
+    role_counts = {}
+    for line in older:
+        role = line.split("：")[0] if "：" in line else "未知"
+        role_counts[role] = role_counts.get(role, 0) + 1
+    summary = "、".join(f"{r}{c}条" for r, c in role_counts.items())
+    return f"[此前消息摘要：{summary}]\n" + "\n".join(recent)
+
+
 def _build_turn_prompt(turn_input: contracts.YangJianTurnInput) -> str:
-    scene = turn_input.scene
-    scene_parts = []
-    if isinstance(scene, dict):
-        loc = scene.get("location", "")
-        if loc:
-            scene_parts.append(f"地理位置：{loc}")
-        weather = scene.get("weather", "")
-        if weather:
-            scene_parts.append(f"天气：{weather}")
-        tod = scene.get("time_of_day", "")
-        if tod:
-            scene_parts.append(f"时间：{tod}")
-        mood = scene.get("mood", "")
-        if mood:
-            scene_parts.append(f"氛围：{mood}")
-    scene_str = "\n".join(scene_parts) if scene_parts else str(scene.get("id", "") if isinstance(scene, dict) else scene)
     lines = [
-        f"当前场景：\n{scene_str}",
         f"本回合任务：{turn_input.task.objective}",
     ]
     if turn_input.task.success_condition.strip():
@@ -94,12 +97,8 @@ def _build_turn_prompt(turn_input: contracts.YangJianTurnInput) -> str:
             if fact.text.strip():
                 lines.append(f"- {fact.text}")
     lines.append("公开消息：")
-    history_lines = [
-        line
-        for message in turn_input.public_room_history
-        if (line := _format_public_message(message))
-    ]
-    lines.extend(history_lines or ["（暂无）"])
+    history = list(turn_input.public_room_history)
+    lines.append(_summarize_history(history))
     return "\n".join(lines)
 
 

@@ -259,16 +259,14 @@ class ResolutionGuardTests(unittest.TestCase):
     def test_valid_resolution_passes(self) -> None:
         self.assertTrue(validate_resolution(resolution(), context()).is_valid)
 
-    def test_requires_decision_for_every_proposal(self) -> None:
+    def test_undecided_proposals_allowed(self) -> None:
+        """PROPOSALS_UNDECIDED check was removed — business layer handles defaults."""
         payload = resolution()
         payload["decisions"] = payload["decisions"][:1]
 
         report = validate_resolution(payload, context())
 
-        self.assertIn(
-            "PROPOSALS_UNDECIDED",
-            {issue.code for issue in report.issues},
-        )
+        self.assertTrue(report.is_valid)
 
     def test_rejects_locked_next_beat(self) -> None:
         payload = resolution()

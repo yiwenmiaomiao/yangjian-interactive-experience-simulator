@@ -83,7 +83,8 @@ INPUT_TEMPLATE = """## narration_task
 {max_chars}
 
 请根据 narration_task 写一段旁白。无话可说时直接返回空字符串。
-重要：你描写的地点必须与"当前场景"中的地理位置一致，不得凭空发明新场所。"""
+重要：你描写的地点必须与"当前场景"中的地理位置一致，不得凭空发明新场所。
+如果你在 text 中描写了一个新地点（用户进入了一个新场所），请在 location 字段填写该地点的简短名称（如"灌江口·密室"）。如果地点没有变化，location 填 null。"""
 
 
 def _format_scene(scene: dict) -> str:
@@ -160,8 +161,10 @@ def draft(turn_input: contracts.NarratorInput) -> dict:
             llm_model=os.environ.get("YANGJIAN_NARRATOR_LLM_MODEL") or None,
         )
         text = output.text.strip()
+        narration_location = getattr(output, "location", None)
     except StructuredOutputError:
         text = ""
+        narration_location = None
     if text in ("", "“”", "''", "（空）", "(空)"):
         text = ""
     text = text[: request.max_characters]
@@ -169,7 +172,7 @@ def draft(turn_input: contracts.NarratorInput) -> dict:
         marker in text
         for marker in ("杨戬说", "用户说", "NPC说", "：“", ": “")
     )
-    return contracts.to_dict(
+    result = contracts.to_dict(
         contracts.NarrationDraft(
             narration_id=f"narration_{len(confirmed)}",
             text=text,
@@ -184,6 +187,9 @@ def draft(turn_input: contracts.NarratorInput) -> dict:
             contains_dialogue=contains_dialogue,
         )
     )
+    if narration_location:
+        result["location"] = narration_location
+    return result
 
 
 def handle_message(

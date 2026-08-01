@@ -915,6 +915,18 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                 narrator.handle_message(narrator_request_message).payload
             )
             narration = str(draft.get("text", ""))
+            # narrator 回写场景地点
+            narration_location = draft.get("location")
+            if narration_location and isinstance(narration_location, str):
+                scene = state.setdefault("scene", {})
+                if scene.get("location", "") != narration_location:
+                    scene["location"] = narration_location
+                    state_manager.save(state)
+                    log_event(
+                        lf_ctx,
+                        "room.scene_location_from_narrator",
+                        output_data={"location": narration_location},
+                    )
             if narration and not draft.get("contains_dialogue"):
                 narration_output = {
                     "role": request.narration_type,

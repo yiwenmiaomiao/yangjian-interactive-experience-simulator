@@ -62,6 +62,62 @@ def handle_message(
     close_trace: bool = True,
     lf_ctx=None,
 ) -> dict:
+
+    # # 前缀 = 提示请求：解析 #问题# 部分，剩余文本作为行动走 room.tick
+    if user_message and str(user_message).strip().startswith("#"):
+        import hint as hint_mod
+        question = hint_mod.parse_hint_question(user_message)
+        # 提取 #问题# 之外的剩余文本作为行动
+        remaining = hint_mod.extract_action_text(user_message)
+
+        if question:
+            # 有疑问：先生成提示
+            hint_result = hint_mod.generate_hint(
+                user_id=user_id,
+                thread_id=thread_id,
+                user_question=question,
+            )
+            # 如果有剩余行动文本，继续走 room.tick，合并两条结果
+            if remaining:
+                tick_result = _run_room_tick(
+                    remaining,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    close_trace=close_trace,
+                    lf_ctx=lf_ctx,
+                )
+                # 合并 hint 输出 + room.tick 输出
+                combined_outputs = []
+                if hint_result.get("ok"):
+                    combined_outputs.extend(hint_result.get("output", []))
+                if tick_result.get("ok"):
+                    combined_outputs.extend(tick_result.get("output", []))
+                return {
+                    "ok": True,
+                    "output": combined_outputs,
+                }
+            # 只有疑问，没有行动：只返回提示
+            return hint_result
+        # # 开头但无法解析出疑问（如 ##），走正常 tick
+
+    return _run_room_tick(
+        user_message,
+        user_id=user_id,
+        thread_id=thread_id,
+        close_trace=close_trace,
+        lf_ctx=lf_ctx,
+    )
+
+
+def _run_room_tick(
+    user_message: str,
+    *,
+    user_id: str = "default",
+    thread_id: str = "default",
+    close_trace: bool = True,
+    lf_ctx=None,
+) -> dict:
+    """Run room.tick with full trace/lifecycle setup."""
     from langfuse_logger import (
         LangfuseCtx,
         start_room_trace,
@@ -70,17 +126,6 @@ def handle_message(
         log_error,
         room_phase,
     )
-
-    # # 前缀 = 提示请求：不走 Room 主循环，直接生成提示
-    if user_message and str(user_message).strip().startswith("#"):
-        import hint as hint_mod
-        question = hint_mod.parse_hint_question(user_message)
-        result = hint_mod.generate_hint(
-            user_id=user_id,
-            thread_id=thread_id,
-            user_question=question,
-        )
-        return result
 
     token = runtime_context.set_identity(user_id, thread_id)
     owns_trace = False

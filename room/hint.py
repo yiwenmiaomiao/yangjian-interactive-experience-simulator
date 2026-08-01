@@ -54,6 +54,24 @@ def is_hint_request(user_message: str) -> bool:
     return user_message.strip().startswith("#")
 
 
+def extract_action_text(user_message: str) -> str:
+    """提取 #问题# 之外的剩余文本作为行动指令。
+
+    例如：
+    - "#这是什么# 然后走近看看" -> "然后走近看看"
+    - "#这是什么#然后走近看看" -> "然后走近看看"
+    - "#这是什么#" -> ""
+    - "#这是什么# 我走过去 #另一个问题#" -> "我走过去"
+    """
+    if not user_message:
+        return ""
+    text = user_message.strip()
+    # 去掉所有 #...# 片段
+    import re as _re
+    cleaned = _re.sub(r"#[^#]+#", "", text).strip()
+    return cleaned if cleaned else ""
+
+
 def generate_hint(
     user_id: str = "default",
     thread_id: str = "default",

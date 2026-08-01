@@ -27,6 +27,46 @@ PROJECT_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
 )))
 
 
+# ── 大纲风格加载 ──────────────────────────────────────────
+
+_OUTLINE_STYLE_CACHE: str | None = None
+
+
+def _load_outline_style() -> str:
+    """从 skills/story-outline-style/SKILL.md 加载大纲风格，作为 system prompt。
+
+    优先读环境变量 YANGJIAN_OUTLINE_STYLE_FILE 指定的文件，
+    默认读项目目录下的 skills/story-outline-style/SKILL.md。
+    解析时去掉 YAML frontmatter，只保留 markdown body。
+    """
+    global _OUTLINE_STYLE_CACHE
+    if _OUTLINE_STYLE_CACHE is not None:
+        return _OUTLINE_STYLE_CACHE
+
+    import re
+
+    style_file = os.environ.get("YANGJIAN_OUTLINE_STYLE_FILE") or os.path.join(
+        PROJECT_DIR, "skills", "story-outline-style", "SKILL.md"
+    )
+
+    try:
+        with open(style_file, encoding="utf-8") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        # Fallback: minimal system prompt if skill file missing
+        _OUTLINE_STYLE_CACHE = (
+            "你是一个分支故事架构师。构建私有分支故事计划。\n"
+            "主线围绕用户（小仙汉）与杨戬，NPC 只在副线。"
+            "不要预写对白，只定义 beat 结构和意图。"
+        )
+        return _OUTLINE_STYLE_CACHE
+
+    # Strip YAML frontmatter (--- ... ---)
+    body = re.sub(r"^---\n.*?\n---\n?", "", raw, flags=re.DOTALL).strip()
+    _OUTLINE_STYLE_CACHE = body
+    return _OUTLINE_STYLE_CACHE
+
+
 # ── 模型适配器（用 room 的 llm 模块） ────────────────────────
 
 
@@ -62,31 +102,7 @@ class HermesModelClient:
         return self._parse_json(raw)
 
     def _build_system_prompt(self, payload: Mapping[str, Any]) -> str:
-        return """你是一个分支故事架构师。你的职责是构建私有分支故事计划。
-
-## 核心约束
-1. 主线唯一核心：用户（小仙汉）与杨戬
-2. NPC 只能出现在副线，不能取代杨戬成为主线核心
-3. 主线结局最多两个
-4. 副线结局数量可配置
-5. 用户的选择通过行为自然表达，不依赖菜单选项
-6. 不要预写对白
-7. 用户不能看到的内部结构（分支图、结局、旗标、伏笔含义）不得泄露
-
-## 故事图要求
-- 每个 Beat 必须有 transition 指向下一节点或结局
-- 所有节点必须可从起始 Beat 到达
-- 所有 Beat 必须有一条路径到达某个结局
-- 不允许循环（除非明确配置）
-- 分支收敛时必须保留用户选择产生的事实差异
-- 每个 Beat 必须有 goal（用户在此节点需要达成的目标）和 max_turns（建议最大轮次，默认6）
-- goal 应该是具体可判断的（如"用户发现杨戬表情异常"、"用户质问杨戬并得到部分真相"），不是抽象的
-- max_turns 根据 beat 复杂度设定：简单对话 3-4，需要探索的 5-6，关键选择 6-8
-
-## 节拍命名规范
-- 主线： m1, m2, m3, ...
-- 副线： s<数字>_1, s<数字>_2, ...（如 s1_1, s1_2）
-- 结局： main_end, main_end_b, side_<id>_end_1, side_<id>_end_2"""
+        return _load_outline_style()
 
     def _build_user_prompt(self, payload: Mapping[str, Any]) -> str:
         rules = payload.get("rules", {})

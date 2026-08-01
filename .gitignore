@@ -16,6 +16,8 @@ cache/
 cron/
 platforms/
 skills/
+!skills/story-outline-style/
+!skills/story-writing-style/
 models_dev_cache.json
 channel_directory.json
 .skills_prompt_snapshot.json

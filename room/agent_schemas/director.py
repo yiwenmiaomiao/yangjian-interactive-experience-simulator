@@ -234,3 +234,11 @@ class DirectorResolutionOutput(BaseModel):
     next_beat: str | None = None
     continuation: ContinuationOutput
     scene_update: SceneUpdateOutput | None = None
+    goal_met: bool = Field(
+        default=False,
+        description="当前 beat 的 goal 是否已达成（用户做了期望的行为/获得了关键信息等）。达成则 Room 推进到下一个 beat。",
+    )
+    sub_goal_met: bool = Field(
+        default=False,
+        description="仅在 recovery 弧中填写：recovery 子目标是否已达成。达成则退出 recovery 回到主线。非 recovery 弧填 false。",
+    )

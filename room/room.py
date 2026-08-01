@@ -150,21 +150,21 @@ def story_plan_status() -> str:
 
 
 def _trigger_recovery(ss_state: dict[str, Any], user_message: str, decision: dict[str, Any]) -> None:
-    """用户偏离剧情时生成短回归弧。"""
+    """beat 到达最大轮次但 goal 未达成时，生成短回归弧。"""
     import story_state as ss
-    
-    # 构造回归 prompt
+
     plan = ss.get_plan()
     if not plan:
         return
-    
+
     current_beat_id = ss_state.get("current_beat_id", "")
     current_beat_purpose = ""
+    current_beat_goal = ss_state.get("beat_goal", "")
     for beat in plan.main_arc.beats:
         if beat.beat_id == current_beat_id:
             current_beat_purpose = beat.purpose
             break
-    
+
     # 找下个主线 beat 作为回归目标
     rejoin_target = ""
     for i, beat in enumerate(plan.main_arc.beats):
@@ -174,56 +174,51 @@ def _trigger_recovery(ss_state: dict[str, Any], user_message: str, decision: dic
             break
     if not rejoin_target and plan.main_arc.beats:
         rejoin_target = plan.main_arc.beats[0].beat_id
-    
+
     recovery_id = f"recovery_{current_beat_id}"
-    
-    # 构建系统提示
-    system = """你是一个短回归剧情架构师。
-用户偏离了主线剧情。你需要生成一个极短的回归弧（1~3个beat），自然地把用户引回主线。
 
-## 规则
-1. 承认用户刚才做的行为，不能假装没发生
-2. 利用用户当前关注的人、物或事件作为回归入口
-3. 用户不能感觉被强制纠正
-4. 回归弧结束后自动回到主线
-5. 不要预写对白
-6. 输出 JSON 格式的 beats
+    system = (
+        "你是一个短回归剧情架构师。\n"
+        "用户在当前剧情节点停留过久（超过最大轮次）但未达成节点目标。"
+        "你需要生成一个极短的回归弧（1个beat），自然地把用户引向下一个剧情节点。\n\n"
+        "## 规则\n"
+        "1. 承认用户刚才的行为，不能假装没发生\n"
+        "2. 设定一个明确的子目标（sub_goal），用户达成后即可进入下一节点\n"
+        "3. 用户不能感觉被强制纠正\n"
+        "4. 不要预写对白\n"
+        "5. 输出 JSON 格式\n\n"
+        "## 输出格式\n"
+        "{\n"
+        "  \"sub_goal\": \"用户需要达成的子目标（如：接受杨戬暂时不能透露真相）\",\n"
+        "  \"beats\": [\n"
+        "    {\n"
+        "      \"beat_id\": \"r1\",\n"
+        "      \"purpose\": \"利用用户当前关注点自然引向下一节点\",\n"
+        "      \"participants\": [\"user\", \"yangjian\"],\n"
+        "      \"allowed_information\": [],\n"
+        "      \"forbidden_reveals\": [\"main_ending\"],\n"
+        "      \"transitions\": [\n"
+        "        {\"transition_id\": \"r1_to_rejoin\", \"target_id\": \"" + rejoin_target + "\", \"preserved_consequences\": [\"用户已接受当前局面\"]}\n"
+        "      ]\n"
+        "    }\n"
+        "  ]\n"
+        "}"
+    )
 
-## 输出格式
-{
-  "beats": [
-    {
-      "beat_id": "r1",
-      "purpose": "利用用户当前关注点自然引向主线",
-      "participants": ["user", "yangjian"],
-      "allowed_information": [],
-      "forbidden_reveals": ["main_ending"],
-      "transitions": [
-        {"transition_id": "r1_to_r2", "target_id": "r2", "preserved_consequences": ["用户刚才的行为"]}
-      ]
-    }
-  ]
-}"""
+    user_prompt = (
+        f"## 用户最新消息\n{user_message[:200]}\n\n"
+        f"## 当前主线 Beat\nID: {current_beat_id}\n"
+        f"目的: {current_beat_purpose[:200]}\n"
+        f"节点目标: {current_beat_goal[:200]}\n\n"
+        f"## 主线目标\n{plan.main_arc.goal[:200]}\n\n"
+        f"## 回归目标 Beat\n{rejoin_target}\n\n"
+        f"## 要求\n"
+        f"生成 1 个回归 beat，设定子目标，利用用户当前关注点自然引向下一节点。"
+    )
 
-    user_prompt = f"""## 用户最新消息
-{user_message[:200]}
-
-## 当前主线 Beat
-ID: {current_beat_id}
-目的: {current_beat_purpose[:200]}
-
-## 主线目标
-{plan.main_arc.goal[:200]}
-
-## 回归目标 Beat
-{rejoin_target}
-
-## 要求
-生成 1~2 个回归 beat，利用用户当前关注点自然引回主线。"""
-    
-    # 调用模型
     room_dir = os.path.join(PROFILE_DIR, "room")
-    sys.path.insert(0, room_dir)
+    if room_dir not in sys.path:
+        sys.path.insert(0, room_dir)
     import llm as room_llm
     raw = room_llm.call(
         system=system,
@@ -231,8 +226,7 @@ ID: {current_beat_id}
         temperature=0.7,
         max_tokens=4000,
     )
-    
-    # 解析
+
     try:
         text = raw.strip()
         for prefix in ("```json", "```"):
@@ -242,8 +236,8 @@ ID: {current_beat_id}
                 break
         recovery_data = json.loads(text.strip())
         beats_raw = recovery_data.get("beats", [])
-        
-        # 验证 beats
+        sub_goal = recovery_data.get("sub_goal", "")
+
         if _valid_recovery_beats(beats_raw, rejoin_target):
             recovery_beats = []
             for b in beats_raw:
@@ -255,13 +249,24 @@ ID: {current_beat_id}
                     "forbidden_reveals": b.get("forbidden_reveals", ["main_ending"]),
                     "transitions": b.get("transitions", [{"transition_id": f"{b['beat_id']}_to_rejoin", "target_id": rejoin_target}]),
                 })
-            
-            ss.enter_recovery_arc(ss_state, recovery_id, recovery_beats, rejoin_target)
+
+            ss.enter_recovery_arc(
+                ss_state,
+                recovery_id,
+                recovery_beats,
+                rejoin_target,
+                sub_goal=sub_goal,
+                max_turns=4,
+            )
+            # 设置 recovery beat 的 goal
+            ss_state["beat_goal"] = sub_goal
+            ss_state["beat_max_turns"] = 4
+            ss.save_state(ss_state)
             # 更新 beat_info 缓存让导演使用
             bi = ss.get_current_beat_info(ss_state)
             director.set_story_context(bi)
-    except (json.JSONDecodeError, KeyError) as e:
-        pass  # 如果生成失败，静默继续当前 beat
+    except (json.JSONDecodeError, KeyError):
+        pass
 
 
 def _valid_recovery_beats(beats: Any, rejoin_target: str) -> bool:
@@ -280,7 +285,63 @@ def _valid_recovery_beats(beats: Any, rejoin_target: str) -> bool:
     return True
 
 
-# ── 主循环 ──────────────────────────────────────────────────
+def _generate_recovery_transition(
+    bi: dict[str, Any],
+    rejoin_target: str,
+    user_message: str,
+    ss_state: dict[str, Any],
+) -> str:
+    """recovery 强制退出时，调 narrator 写一段过渡剧情衔接下一 beat。"""
+    import story_state as ss
+
+    plan = ss.get_plan()
+    if not plan:
+        return ""
+
+    # 找到 rejoin_target 的 beat purpose
+    target_purpose = ""
+    target_beat = ss._find_beat(plan, rejoin_target)
+    if target_beat:
+        target_purpose = target_beat.purpose
+
+    # 找当前 recovery 的子目标
+    sub_goal = ss_state.get("recovery_sub_goal", "")
+    current_beat_purpose = bi.get("beat_purpose", "")
+
+    system = (
+        "你是杨戬项目的旁白。用户在剧情缓冲段停留过久，现在需要强行推进到下一个剧情节点。\n"
+        "请写一段过渡旁白（100-200字），自然地将当前局面衔接到下一个剧情节点。\n"
+        "规则：\n"
+        "1. 可以替用户做简短行动（如'你跟着杨戬走出了密室'）\n"
+        "2. 时间可以跳跃（如'午后'、'片刻后'）\n"
+        "3. 不要写角色对白\n"
+        "4. 为下一个剧情节点做铺垫，但不直接透露具体内容\n"
+        "5. 用第二人称'你'视角"
+    )
+    prompt = (
+        f"当前剧情节点目的：{current_beat_purpose[:200]}\n"
+        f"缓冲段子目标：{sub_goal[:200]}\n"
+        f"下一剧情节点：{rejoin_target}\n"
+        f"下一节点目的：{target_purpose[:200]}\n"
+        f"用户最后的行为：{user_message[:200]}\n\n"
+        f"请写一段过渡旁白。"
+    )
+
+    room_dir = os.path.join(PROFILE_DIR, "room")
+    if room_dir not in sys.path:
+        sys.path.insert(0, room_dir)
+    import llm as room_llm
+    raw = room_llm.call(
+        agent_id="narrator",
+        system=system,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.6,
+        max_tokens=500,
+    )
+    text = str(raw or "").strip()
+    if len(text) > 250:
+        text = text[:250]
+    return text
 
 
 @_serialized_tick
@@ -518,20 +579,11 @@ def tick(
             ss_state = ss.load_state()
             if ss_state.get("status") == "active":
                 ss.increment_beat_tick(ss_state)
-                
-                # 检查导演是否检测到偏离
-                deviation_signal = decision.get("deviation_signal")
-                if deviation_signal:
-                    user_msg = user_message or ""
-                    needs_recovery = ss.record_deviation(ss_state, user_msg)
-                    if needs_recovery:
-                        # 尝试兼容——如果导演说可以兼容，就不触发回归
-                        compatible = decision.get("deviation_compatible", False)
-                        if not compatible and not ss_state.get("in_recovery"):
-                            _trigger_recovery(ss_state, user_msg, decision)
-                else:
-                    ss.clear_deviation(ss_state)
-                
+
+                # beat max_turns 检查：到达最大轮次但 goal 未达成 -> 进入 recovery
+                if not ss_state.get("in_recovery") and ss.check_beat_max_turns(ss_state):
+                    _trigger_recovery(ss_state, user_message or "", decision)
+
                 # 检查副线解锁
                 newly = ss.check_and_unlock_side_arcs(ss_state)
                 if newly:
@@ -1508,39 +1560,87 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
         ss.check_and_unlock_side_arcs(ss.load_state())
         _beat_advanced = True
 
-    # 偏离检测
-    deviation_signal = directive.get("observed_user_intent", {}).get("intent", "")
-    if deviation_signal and deviation_signal not in ("continue", "engage"):
-        needs = ss.record_deviation(ss_state, user_message or "")
-        if needs and not ss_state.get("in_recovery"):
-            _trigger_recovery(ss_state, user_message or "", directive)
-    else:
-        ss.clear_deviation(ss_state)
+    # beat goal 检测：director resolve 输出 goal_met
+    goal_met = resolution.get("goal_met", False)
+    sub_goal_met = resolution.get("sub_goal_met", False)
 
-    # 两阶段模式也递增 beat tick（legacy 在 tick() 里递增，这里补上）
-    if not _beat_advanced and ss_state.get("status") == "active":
-        ss.increment_beat_tick(ss_state)
+    if goal_met and not _beat_advanced:
+        # goal 达成，推进到下一个 beat
+        transitions = bi.get("available_transitions", [])
+        if transitions:
+            next_beat_id = str(transitions[0].get("target_id", ""))
+            if next_beat_id:
+                ss.advance_beat(ss_state, next_beat_id)
+                bi = ss.get_current_beat_info(ss.load_state())
+                director.set_story_context(bi)
+                _beat_advanced = True
+                log_event(
+                    lf_ctx,
+                    "room.beat_goal_met",
+                    output_data={"next_beat": next_beat_id},
+                )
 
-    # recovery 弧自动推进：停留超阈值时 Room 强制推进，
-    # 避免用户在回归弧里无限循环（fast_direct 无 RESOLVE 的 next_beat）
-    if not _beat_advanced and ss_state.get("in_recovery"):
-        recovery_target = ss.recovery_next_beat(ss.load_state())
-        if recovery_target:
-            ss.advance_beat(ss_state, recovery_target)
-            # 更新 director 缓存
+    # recovery 子目标检测
+    if not _beat_advanced and ss_state.get("in_recovery") and sub_goal_met:
+        rejoin_target = ss.exit_recovery_arc(ss_state)
+        if rejoin_target:
+            ss.advance_beat(ss_state, rejoin_target)
             bi = ss.get_current_beat_info(ss.load_state())
             director.set_story_context(bi)
             _beat_advanced = True
             log_event(
                 lf_ctx,
-                "room.recovery_auto_advance",
+                "room.recovery_sub_goal_met",
+                output_data={"rejoin_target": rejoin_target},
+            )
+
+    # 递增 beat tick（未推进时）
+    if not _beat_advanced and ss_state.get("status") == "active":
+        ss.increment_beat_tick(ss_state)
+
+    # beat max_turns 检查：到达最大轮次但 goal 未达成 -> 进入 recovery
+    if not _beat_advanced and not ss_state.get("in_recovery"):
+        if ss.check_beat_max_turns(ss_state):
+            log_event(
+                lf_ctx,
+                "room.beat_max_turns_reached",
                 output_data={
-                    "target": recovery_target,
-                    "in_recovery": bool(ss_state.get("in_recovery")),
                     "tick_count": ss_state.get("beat_tick_counter", 0),
+                    "max_turns": ss_state.get("beat_max_turns", 6),
+                    "beat_goal": ss_state.get("beat_goal", ""),
                 },
                 level="WARNING",
             )
+            _trigger_recovery(ss_state, user_message or "", resolution)
+
+    # recovery max_turns 检查：到达最大回合但子目标未达成 -> 强行退出 + narrator 过渡
+    if not _beat_advanced and ss_state.get("in_recovery"):
+        if ss.check_recovery_max_turns(ss_state):
+            rejoin_target = ss.exit_recovery_arc(ss_state)
+            if rejoin_target:
+                # narrator 写过渡剧情衔接下一 beat
+                transition_text = _generate_recovery_transition(
+                    bi, rejoin_target, user_message or "", ss_state
+                )
+                ss.advance_beat(ss_state, rejoin_target)
+                bi = ss.get_current_beat_info(ss.load_state())
+                director.set_story_context(bi)
+                _beat_advanced = True
+                log_event(
+                    lf_ctx,
+                    "room.recovery_force_exit",
+                    output_data={
+                        "rejoin_target": rejoin_target,
+                        "transition_narration": bool(transition_text),
+                    },
+                    level="WARNING",
+                )
+                if transition_text:
+                    narration_outputs.append({
+                        "role": "场景",
+                        "text": transition_text,
+                        "kind": "narration",
+                    })
 
     # 限制日志长度
     if len(state.get("event_log", [])) > 500:
@@ -2059,15 +2159,9 @@ def _tick_traditional_fallback(state, user_message=None, source="cron"):
         import story_state as ss
         ss_state = ss.load_state()
         if ss_state.get("status") == "active":
-            deviation = decision.get("deviation_signal")
-            if deviation:
-                needs = ss.record_deviation(ss_state, user_message)
-                if needs and not ss_state.get("in_recovery"):
-                    compatible = decision.get("deviation_compatible", False)
-                    if not compatible:
-                        _trigger_recovery(ss_state, user_message, decision)
-            else:
-                ss.clear_deviation(ss_state)
+            # beat max_turns 检查
+            if not ss_state.get("in_recovery") and ss.check_beat_max_turns(ss_state):
+                _trigger_recovery(ss_state, user_message, decision)
 
     state["tick"] = state.get("tick", 0) + 1
     state_manager.save(state)

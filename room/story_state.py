@@ -62,13 +62,17 @@ def default_state() -> dict[str, Any]:
         "unlocked_side_arcs": [],
         "active_side_arcs": [],
         "beat_tick_counter": 0,
-        # 偏离检测
-        "deviation_count": 0,
-        "consecutive_deviation": 0,
-        "last_deviation_at": None,
+        # beat goal 检测
+        "beat_goal": "",
+        "beat_max_turns": 6,
+        "beat_goal_met": False,
+        # recovery 弧
         "in_recovery": False,
         "recovery_arc_id": None,
         "recovery_rejoin_target": None,
+        "recovery_sub_goal": "",
+        "recovery_max_turns": 4,
+        "recovery_sub_goal_met": False,
         # 杨戬对用户的关系状态
         "relationship": {
             "trust": 1,
@@ -138,6 +142,9 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
                     "story_id": plan.story_id,
                     "current_beat_id": b["beat_id"],
                     "beat_purpose": b["purpose"],
+                    "beat_goal": state.get("beat_goal", ""),
+                    "beat_max_turns": state.get("beat_max_turns", 6),
+                    "beat_tick_counter": state.get("beat_tick_counter", 0),
                     "participants": b.get("participants", ["user", "yangjian"]),
                     "allowed_information": b.get("allowed_information", []),
                     "forbidden_reveals": b.get("forbidden_reveals", []),
@@ -152,9 +159,11 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
                     "main_progress": state.get("main_progress", 0.0),
                     "flags": dict(state.get("flags", {})),
                     "consequences": list(state.get("selected_branch_consequences", [])),
-                    "beat_tick_counter": state.get("beat_tick_counter", 0),
-                        "in_recovery": True,
-                    }
+                    "in_recovery": True,
+                    "recovery_sub_goal": state.get("recovery_sub_goal", ""),
+                    "recovery_max_turns": state.get("recovery_max_turns", 4),
+                    "recovery_tick_counter": state.get("beat_tick_counter", 0),
+                }
     beat = _find_beat(plan, current_id)
     if not beat:
         return {"error": f"beat_not_found:{current_id}"}
@@ -184,6 +193,9 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
         "story_id": plan.story_id,
         "current_beat_id": beat.beat_id,
         "beat_purpose": beat.purpose,
+        "beat_goal": state.get("beat_goal", ""),
+        "beat_max_turns": state.get("beat_max_turns", 6),
+        "beat_tick_counter": state.get("beat_tick_counter", 0),
         "participants": list(beat.participants),
         "allowed_information": list(beat.allowed_information),
         "forbidden_reveals": list(beat.forbidden_reveals),
@@ -193,7 +205,6 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
         "main_progress": state.get("main_progress", 0.0),
         "flags": dict(state.get("flags", {})),
         "consequences": list(state.get("selected_branch_consequences", [])),
-        "beat_tick_counter": state.get("beat_tick_counter", 0),
         "relationship_checkpoint": getattr(beat, "relationship_checkpoint", None),
     }
 
@@ -313,6 +324,7 @@ def advance_beat(state: dict[str, Any], target_beat_id: str, consequences: list[
 
     state["current_beat_id"] = target_beat_id
     state["beat_tick_counter"] = 0
+    state["beat_goal_met"] = False
 
     # recovery 弧退出：推进到非 recovery 的 beat 时，清除 recovery 状态
     if state.get("in_recovery"):
@@ -325,6 +337,25 @@ def advance_beat(state: dict[str, Any], target_beat_id: str, consequences: list[
             state["recovery_arc_id"] = None
             state["_recovery_beats"] = []
             state["recovery_rejoin_target"] = None
+            state["recovery_sub_goal"] = ""
+            state["recovery_sub_goal_met"] = False
+
+    # 设置新 beat 的 goal 和 max_turns
+    beat = _find_beat(plan, target_beat_id)
+    if beat:
+        # 从 story plan 读取 goal 和 max_turns（如果有）
+        beat_goal = getattr(beat, "goal", "") or getattr(beat, "beat_goal", "")
+        beat_max_turns = getattr(beat, "max_turns", 0) or 0
+        state["beat_goal"] = beat_goal
+        state["beat_max_turns"] = beat_max_turns if beat_max_turns > 0 else 6
+    else:
+        # recovery beat: goal 从 beat purpose 推导
+        recovery_beats = state.get("_recovery_beats", [])
+        for rb in recovery_beats:
+            if rb.get("beat_id") == target_beat_id:
+                state["beat_goal"] = rb.get("purpose", "")
+                state["beat_max_turns"] = rb.get("max_turns", 4)
+                break
 
     # 保存分支后果
     if consequences:
@@ -386,87 +417,95 @@ def increment_beat_tick(state: dict[str, Any]) -> None:
     save_state(state)
 
 
-# ── 偏离检测 ──────────────────────────────────────────────
+# ── beat goal 检测 ─────────────────────────────────────────
 
 
-DEVIATION_THRESHOLD = 2  # 连续偏离多少次触发回归
+def check_beat_goal(state: dict[str, Any], goal_met: bool) -> bool:
+    """Director resolve 调用：标记当前 beat 的 goal 是否达成。
 
-
-def record_deviation(state: dict[str, Any], user_message: str) -> bool:
-    """记录一次偏离。返回 True 表示需要触发回归。"""
-    from datetime import datetime
-    state["deviation_count"] = state.get("deviation_count", 0) + 1
-    state["consecutive_deviation"] = state.get("consecutive_deviation", 0) + 1
-    state["last_deviation_at"] = datetime.now().isoformat()
+    返回 True 表示 goal 达成，Room 应推进到下一个 beat。
+    """
+    state["beat_goal_met"] = goal_met
     save_state(state)
-    return state["consecutive_deviation"] >= DEVIATION_THRESHOLD
+    return goal_met
 
 
-def clear_deviation(state: dict[str, Any]) -> None:
-    """用户回到正轨时清零偏离计数。"""
-    state["consecutive_deviation"] = 0
-    save_state(state)
+def check_beat_max_turns(state: dict[str, Any]) -> bool:
+    """检查当前 beat 是否已达到最大轮次。
+
+    返回 True 表示已达到 max_turns，需要 director 判定 goal 是否达成，
+    未达成则进入 recovery。
+    """
+    max_turns = state.get("beat_max_turns", 6)
+    if max_turns <= 0:
+        return False
+    return state.get("beat_tick_counter", 0) >= max_turns
 
 
-# ── 回归弧管理 ────────────────────────────────────────────
+def ensure_beat_goal(state: dict[str, Any]) -> str | None:
+    """如果 beat_goal 为空，返回需要 director 动态生成的信号。"""
+    if not state.get("beat_goal"):
+        return "needs_generation"
+    return None
 
 
-def enter_recovery_arc(state: dict[str, Any], recovery_arc_id: str, recovery_beats: list[dict], rejoin_target: str) -> None:
-    """进入回归弧模式。"""
+# ── recovery 弧管理 ─────────────────────────────────────────
+
+
+def enter_recovery_arc(
+    state: dict[str, Any],
+    recovery_arc_id: str,
+    recovery_beats: list[dict],
+    rejoin_target: str,
+    sub_goal: str = "",
+    max_turns: int = 4,
+) -> None:
+    """进入回归弧模式。
+
+    sub_goal: 本次 recovery 的子目标（director resolve 每回合检测是否达成）
+    max_turns: 最大回合数，到了仍没达成子目标则强行退出
+    """
     state["in_recovery"] = True
     state["recovery_arc_id"] = recovery_arc_id
     state["_recovery_beats"] = recovery_beats
     state["recovery_rejoin_target"] = rejoin_target
+    state["recovery_sub_goal"] = sub_goal
+    state["recovery_max_turns"] = max_turns
+    state["recovery_sub_goal_met"] = False
     state["current_beat_id"] = recovery_beats[0]["beat_id"] if recovery_beats else rejoin_target
     state["beat_tick_counter"] = 0
-    state["consecutive_deviation"] = 0
     save_state(state)
 
 
-def exit_recovery_arc(state: dict[str, Any]) -> None:
-    """退出回归弧，回到主线。"""
+def check_recovery_sub_goal(state: dict[str, Any], sub_goal_met: bool) -> bool:
+    """Director resolve 调用：标记 recovery 子目标是否达成。
+
+    返回 True 表示子目标达成，应退出 recovery 回到主线。
+    """
+    state["recovery_sub_goal_met"] = sub_goal_met
+    save_state(state)
+    return sub_goal_met
+
+
+def check_recovery_max_turns(state: dict[str, Any]) -> bool:
+    """检查 recovery 是否已达到最大回合数。
+
+    返回 True 表示需要强行退出 recovery（narrator 写过渡剧情衔接下一 beat）。
+    """
+    max_turns = state.get("recovery_max_turns", 4)
+    if max_turns <= 0:
+        return False
+    return state.get("beat_tick_counter", 0) >= max_turns
+
+
+def exit_recovery_arc(state: dict[str, Any]) -> str | None:
+    """退出回归弧，回到主线。返回 rejoin_target（供 Room 调 narrator 写过渡）。"""
+    target = state.get("recovery_rejoin_target")
     state["in_recovery"] = False
     state["recovery_arc_id"] = None
-    target = state.get("recovery_rejoin_target")
-    if target:
-        state["current_beat_id"] = target
     state["recovery_rejoin_target"] = None
-    state["beat_tick_counter"] = 0
+    state["recovery_sub_goal"] = ""
+    state["recovery_sub_goal_met"] = False
+    state["_recovery_beats"] = []
     save_state(state)
-
-
-RECOVERY_MAX_TICKS = 2
-"""recovery 弧每个 beat 允许停留的最大 tick 数。
-
-recovery 弧是短期回归，目的是快速把用户引回主线。超过阈值后
-Room 自动推进，避免用户在 recovery 弧里无限循环。
-"""
-
-
-def recovery_next_beat(state: dict[str, Any]) -> str | None:
-    """返回 recovery 弧当前 beat 应推进到的下一个 beat（或 None）。
-
-    规则：
-    - 当前不在 recovery 弧 -> None
-    - 当前 beat 停留 tick 数 < RECOVERY_MAX_TICKS -> None（还没到推进时机）
-    - 否则返回当前 beat 的第一个 transition 目标；
-      若当前是弧内最后一个 beat，返回 rejoin_target（回到主线）
-    """
-    if not state.get("in_recovery"):
-        return None
-    tick_count = state.get("beat_tick_counter", 0)
-    if tick_count < RECOVERY_MAX_TICKS:
-        return None
-    current = state.get("current_beat_id", "")
-    beats = state.get("_recovery_beats", [])
-    for i, b in enumerate(beats):
-        if b.get("beat_id") != current:
-            continue
-        transitions = b.get("transitions", [])
-        if transitions:
-            return str(transitions[0].get("target_id", "")) or None
-        # 无 transition 的 recovery beat：最后一个则回主线，否则走下一个
-        if i + 1 < len(beats):
-            return str(beats[i + 1].get("beat_id", "")) or None
-        return state.get("recovery_rejoin_target")
-    return None
+    return target

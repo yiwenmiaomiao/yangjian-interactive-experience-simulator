@@ -664,27 +664,30 @@ def _resolve_story(
     if not bi:
         return {"error": "no_story_context"}
 
-    resolve_prompt = """你是导演，现在进入 RESOLVE（裁决）阶段。
-
-你收到本回合所有角色的结构化结果，以及 DIRECT 阶段识别的用户回合信息。
-对每个角色结果做出裁决；若 user_turn.disclosure.required=true，还必须裁决用户行动结果。
-
-你只裁决"结果是什么"，不写剧情文本，不补写对白。
-你不能停止运行。即使所有角色都请求不行动，也必须给出 continuation。
-
-规则：
-- accept：角色行为按其基本含义发生
-- modify：行为发生，但结果由你调整
-- reject：行为未发生或被阻止
-- accept_abstention：接受角色本回合不行动，但你仍需安排其他发展
-- user_outcome：仅当 user_turn.disclosure.required=true 时 applies=true
-- user_outcome.outcome_summary 写用户感知到的事实（如"盒中是玉符"），不写文学描写
-- revealed_fact_ids 只能来自 allowed_information
-- presentation.required=true 表示需要旁白向用户呈现该结果
-- state_changes 只是提案，Room 决定是否生效
-- next_beat 只能填已解锁的 beat ID，否则 null
-- continuation 必填；Director 没有 hold 或停止选项
-"""
+    resolve_prompt = (
+        "你是导演，现在进入 RESOLVE（裁决）阶段。\n"
+        "\n"
+        "你收到本回合所有角色的结构化结果，以及 DIRECT 阶段识别的用户回合信息。\n"
+        "对每个角色结果做出裁决；若 user_turn.disclosure.required=true，还必须裁决用户行动结果。\n"
+        "\n"
+        "你只裁决\"结果是什么\"，不写剧情文本，不补写对白。\n"
+        "你不能停止运行。即使所有角色都请求不行动，也必须给出 continuation。\n"
+        "\n"
+        "规则：\n"
+        "- accept：角色行为按其基本含义发生\n"
+        "- modify：行为发生，但结果由你调整\n"
+        "- reject：行为未发生或被阻止\n"
+        "- accept_abstention：接受角色本回合不行动，但你仍需安排其他发展\n"
+        "- user_outcome：仅当 user_turn.disclosure.required=true 时 applies=true\n"
+        "- user_outcome.outcome_summary 写用户感知到的事实（如\"盒中是玉符\"），不写文学描写\n"
+        "- revealed_fact_ids 只能来自 allowed_information\n"
+        "- presentation.required=true 表示需要旁白向用户呈现该结果\n"
+        "- state_changes 只是提案，Room 决定是否生效\n"
+        "- next_beat 只能填已解锁的 beat ID，否则 null\n"
+        f"- goal_met：判断当前 beat 的目标是否已达成。beat 目标：{bi.get('beat_goal', '未设定')}。用户做出期望行为或获得关键信息即为达成。\n"
+        f"- sub_goal_met：仅在 recovery 弧中填写。recovery 子目标：{bi.get('recovery_sub_goal', '非recovery弧')}。非 recovery 弧填 false。\n"
+        "- continuation 必填；Director 没有 hold 或停止选项\n"
+    )
 
     situation_parts = []
     if user_message:
@@ -1319,6 +1322,8 @@ def _normalize_resolution(
     else:
         result["state_changes"] = []
     result.setdefault("next_beat", None)
+    result.setdefault("goal_met", False)
+    result.setdefault("sub_goal_met", False)
     result.setdefault(
         "user_outcome",
         {

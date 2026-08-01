@@ -188,6 +188,7 @@ STORY_CONTEXT_TEMPLATE = """
 
 当前 Beat：{beat_id}
 Beat 目的：{beat_purpose}
+Beat 目标：{beat_goal}
 
 当前场景：
   地理位置：{scene_location}
@@ -542,9 +543,13 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
     pool_token = set_available_targets(available_ids)
 
     scene = state.get("scene", {})
+    beat_goal = bi.get("beat_goal", "")
+    if not beat_goal:
+        beat_goal = "未设定（请根据 beat 目的推断用户需要达成什么目标，并在 goal_met 中判断）"
     context = STORY_CONTEXT_TEMPLATE.format(
         beat_id=bi.get("current_beat_id", ""),
         beat_purpose=bi.get("beat_purpose", ""),
+        beat_goal=beat_goal,
         scene_location=scene.get("location", "未设定"),
         scene_weather=scene.get("weather", state.get("weather", "未知")),
         scene_time_of_day=scene.get("time_of_day", "未设定"),

@@ -121,6 +121,8 @@ def _beat(data: Mapping[str, Any]) -> StoryBeat:
     return StoryBeat(
         beat_id=str(data["beat_id"]),
         purpose=str(data["purpose"]),
+        goal=str(data.get("goal", "")),
+        max_turns=int(data.get("max_turns", 6)),
         participants=tuple(data["participants"]),
         transitions=tuple(
             _transition(item) for item in data.get("transitions", ())

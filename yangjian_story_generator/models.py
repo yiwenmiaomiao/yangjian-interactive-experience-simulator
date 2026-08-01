@@ -246,6 +246,8 @@ class NPCProfileSpec:
 class StoryBeat:
     beat_id: str
     purpose: str
+    goal: str = ""
+    max_turns: int = 6
     participants: tuple[str, ...]
     transitions: tuple[BranchTransition, ...] = ()
     prerequisites: tuple[str, ...] = ()

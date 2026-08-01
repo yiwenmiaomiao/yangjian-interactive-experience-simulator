@@ -79,6 +79,9 @@ class HermesModelClient:
 - 所有 Beat 必须有一条路径到达某个结局
 - 不允许循环（除非明确配置）
 - 分支收敛时必须保留用户选择产生的事实差异
+- 每个 Beat 必须有 goal（用户在此节点需要达成的目标）和 max_turns（建议最大轮次，默认6）
+- goal 应该是具体可判断的（如"用户发现杨戬表情异常"、"用户质问杨戬并得到部分真相"），不是抽象的
+- max_turns 根据 beat 复杂度设定：简单对话 3-4，需要探索的 5-6，关键选择 6-8
 
 ## 节拍命名规范
 - 主线： m1, m2, m3, ...
@@ -132,6 +135,8 @@ class HermesModelClient:
       {{
         "beat_id": "m1",
         "purpose": "这个beat的目的",
+        "goal": "用户在这个beat需要达成的目标（如：发现杨戬的异常、获得关键信息、做出选择等）",
+        "max_turns": 6,
         "participants": ["user", "yangjian"],
         "prerequisites": [],
         "allowed_information": [],

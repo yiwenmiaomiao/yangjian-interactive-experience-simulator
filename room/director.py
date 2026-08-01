@@ -499,10 +499,9 @@ def _fast_direct_directive(
 def _decide_story(state, user_message=None) -> dict[str, Any]:
     """故事计划模式：输出结构化调度指令。
 
-    fast_direct 是默认路径：
-    - passive/dialogue 用户输入：跳过 LLM，确定性构造 directive（不花时间）
-    - physical_action/declarative_choice：仍调 LLM，但用非推理模型
-      （deepseek-chat），避免 reasoning_tokens 拖慢响应
+    每个回合都走 director LLM（deepseek-chat 非推理模型），
+    director 分析用户输入并决定：派谁做什么、是否需要旁白、是否需要 RESOLVE。
+    不跳过 LLM——director 是剧情推进的核心，不能省略。
 
     可用 YANGJIAN_DIRECTOR_LLM_MODEL 覆盖 director 使用的模型。
     """
@@ -511,10 +510,6 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
     bi = _CACHED_BEAT_INFO
     if not bi:
         return _fallback_directive()
-
-    fast = _fast_direct_directive(bi, user_message)
-    if fast is not None:
-        return fast
 
     llm_model = _os.environ.get("YANGJIAN_DIRECTOR_LLM_MODEL") or None
 

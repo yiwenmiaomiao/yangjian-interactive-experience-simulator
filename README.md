@@ -431,7 +431,57 @@ yangjian-interactive-experience-simulator/
 
 Room 是唯一允许做消息路由和状态提交的地方。
 
-## 15. 兼容策略
+## 15. 场景状态机
+
+### 问题
+
+旧版本中 `world_state.current_scene` 存的是 beat_id（如 `"r1"`、`"m2"`），不是人类可读的地名。Narrator 拿到的 scene 字段就是 `"r1"`，对 LLM 毫无地理意义，导致每个 tick 的旁白可以凭空发明新地点（如用户在山里，旁白却描写"廊下"）。
+
+### 方案
+
+在 `world_state.json` 新增 `scene` 对象，统一管理当前物理环境：
+
+```json
+"scene": {
+  "location": "灌江口·密室",
+  "weather": "薄雾微凉",
+  "time_of_day": "深夜",
+  "mood": "凝重"
+}
+```
+
+| 子字段 | 含义 | 示例 |
+|---|---|---|
+| `location` | 当前地理位置（人类可读） | "灌江口·密室"、"桃山·山脚" |
+| `weather` | 天气状态 | "薄雾微凉"、"晴" |
+| `time_of_day` | 一天中的时段（不是日期） | "清晨"、"黄昏"、"深夜" |
+| `mood` | 氛围基调 | "压抑"、"紧张"、"平静" |
+
+### 数据流
+
+1. **Director 输出 `scene_update`**：当场景需要变化时，Director 在 DIRECT 或 RESOLVE 阶段输出 `scene_update`，只填变化字段，null 表示不变
+2. **Room 统一写入**：resolve 阶段合并 `scene_update` 到 `world_state.scene`，只有 Room 能写
+3. **所有 Agent 可读**：beat_info 注入 `scene` 对象，Director、Narrator、杨戬、NPC 都能从上下文看到当前场景
+4. **story_facts 摘要**：`get_facts_summary()` 从 `world_state.scene` 读取，注入到 bi 的 `facts_summary` 字段
+
+### Narrator 约束
+
+Narrator 的 prompt 展示结构化场景（地理/天气/时间/氛围），并增加约束：**不得描写与当前地理位置矛盾的场所**。
+
+### 涉及文件
+
+| 文件 | 改动 |
+|---|---|
+| `room/state_manager.py` | `scene` 对象，`get_perception` 和 `apply_changes` 读写 scene |
+| `room/agent_schemas/director.py` | `SceneUpdateOutput` model |
+| `room/director.py` | prompt 注入场景，输出 `scene_update` |
+| `room/room.py` | bi 注入 scene，resolve 应用 scene_update |
+| `room/narrator.py` | 结构化场景 prompt + 约束 |
+| `room/yangjian.py` | prompt 注入结构化场景 |
+| `room/npc_manager/prompting.py` | NPC turn input 注入 scene |
+| `room/story_facts.py` | `get_facts_summary()` 读取 scene |
+
+## 16. 兼容策略
 
 当前仍保留以下旧接口，供现有 Hermes/网关代码逐步迁移：
 
@@ -445,7 +495,7 @@ Director LLM 与 Guard 现在共用 canonical `DIRECTIVE_SCHEMA` / `RESOLUTION_S
 
 新代码不得继续依赖这些兼容接口。兼容逻辑只能存在于边界层，不能重新进入 Room 核心流程。
 
-## 16. 验证
+## 17. 验证
 
 在项目根目录运行（Windows PowerShell）：
 

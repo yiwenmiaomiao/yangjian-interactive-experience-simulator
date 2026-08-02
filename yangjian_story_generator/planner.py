@@ -109,6 +109,17 @@ class HermesModelClient:
 ## 规则
 {json.dumps(rules, ensure_ascii=False, indent=2)}
 
+## 地理一致性规则（强制）
+生成每个 beat 时，必须确保：
+1. **beat.plot 的场景位置**必须明确（如"山中旧庙废墟"或"山中古道"）。
+2. **transition.goal 里的行动方向**必须与当前 beat.plot 描述的场景逻辑衔接：
+   - 如果当前 beat 在"山中旧庙"，transition goal 写"去镇外"是**不允许**的（地理跳跃）。
+   - 跨地理区域的 transition（如从山中到镇外），必须在 transition goal 里明确写"离开当前区域前往X地"，且下一个 beat 的 plot 必须以该新地点开头。
+3. **side arc 的首个 beat**必须与触发它的 transition goal 描述的方向一致。
+4. **不允许**在一个 beat 的 plot 里写"遇仙桥在镇外"而 transition goal 写"引向遇仙桥方向"但当前 beat 在山中——这是地理矛盾。
+
+简言之：**transition goal 描述的是用户要做的选择，不是承诺下一个 beat 的位置。下一个 beat 的位置由该 beat 自己的 plot 决定，但两者必须逻辑衔接。**
+
 ## 标准
 {json.dumps(standard, ensure_ascii=False, indent=2)}
 

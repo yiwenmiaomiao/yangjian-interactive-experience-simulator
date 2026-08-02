@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Iterable
@@ -294,25 +295,38 @@ class StoryPlanValidator:
                     if beat_arc != "main" and target_arc not in ("main", "", beat_arc):
                         issues.append(self._error("CROSS_SIDE_ARC_TRANSITION", f"Side arc beat {beat.beat_id} ({beat_arc}) transitions to different side arc beat {transition.target_id} ({target_arc}).", beat_location))
 
-                    # 地理一致性：transition goal 描述必须与当前 beat 场景位置相关
-                    src_beat = beat
-                    goal = (transition.goal or "").lower()
-                    plot = (src_beat.plot or "").lower()
-                    # 提取 goal 中暗示位置的关键词（镇外/旧庙/山中等）
-                    goal_location_hints = ["镇外", "小镇", "灌江口", "集市", "杨府", "府内", "街道"]
-                    plot_has_location = any(loc in plot for loc in goal_location_hints)
-                    goal_has_contradict = False
-                    for loc in goal_location_hints:
-                        if loc in goal and loc not in plot:
-                            goal_has_contradict = True
-                            break
-                    # 如果 goal 暗示了地点但该地点不在 beat plot 里，报告警告
-                    if goal_has_contradict:
-                        issues.append(self._warning(
-                            "TRANSITION_GOAL_LOCATION_MISMATCH",
-                            f"Transition goal mentions a location not present in beat plot: transition={transition.transition_id} goal='{transition.goal[:40]}...' beat={beat.beat_id}",
-                            beat_location
-                        ))
+                    # 地理一致性：提取 goal 中出现的潜在位置词（2-4字中文连续词组），
+                    # 如果该词不在当前 beat plot 里出现，说明 transition 暗示了地理移动；
+                    # 验证目标 beat plot 是否承接了这个新位置。
+                    goal_text = transition.goal or ""
+                    plot_text = beat.plot or ""
+                    # 提取目标 beat 的 plot（用于检查是否衔接）
+                    target_beat = next(
+                        (b for b in all_beats if b.beat_id == transition.target_id), None
+                    )
+                    target_plot = (target_beat.plot or "") if target_beat else ""
+
+                    # 从 goal 提取 2-4 字中文词组作为候选位置词
+                    candidates = re.findall(r'[\u4e00-\u9fff]{2,4}', goal_text)
+                    for cand in candidates:
+                        # 排除常见的通用词（动作/情绪/描述词）
+                        if cand in (
+                            "用户选择", "跟随杨戬", "寻找异响", "突然出现", "引向",
+                            "直接逼问", "沉默片刻", "模糊的警告", "用户主动",
+                            "走向桥头", "与人影对话", "向杨戬询问", "接过木匣",
+                        ):
+                            continue
+                        # 如果候选词不在当前 beat plot 里出现，视为暗示了新位置
+                        if cand not in plot_text:
+                            # 检查目标 beat plot 是否承接了这个位置
+                            if target_plot and cand not in target_plot:
+                                issues.append(self._warning(
+                                    "TRANSITION_GOAL_LOCATION_MISMATCH",
+                                    f"Transition goal introduces location '{cand}' not in source beat, "
+                                    f"and target beat does not承接: transition={transition.transition_id} "
+                                    f"beat={beat.beat_id} -> {transition.target_id}",
+                                    beat_location
+                                ))
 
         for duplicate in self._duplicates(transition_ids):
             issues.append(self._error("DUPLICATE_TRANSITION_ID", f"Transition id is duplicated: {duplicate}", "graph"))

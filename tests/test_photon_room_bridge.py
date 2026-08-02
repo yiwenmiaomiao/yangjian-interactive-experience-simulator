@@ -18,7 +18,7 @@ class EnsureStoryActiveTests(unittest.TestCase):
             "current_beat_id": "m3",
             "completed_beats": ["m1", "m2"],
         }
-        beat_info = {"current_beat_id": "m3", "beat_purpose": "continue"}
+        beat_info = {"current_beat_id": "m3", "beat_plot": "continue"}
 
         with (
             patch.object(bridge.ss, "get_plan", return_value=None),
@@ -46,7 +46,7 @@ class EnsureStoryActiveTests(unittest.TestCase):
             "completed_beats": [],
         }
         activated = {"status": "active", "current_beat_id": "m1"}
-        beat_info = {"current_beat_id": "m1", "beat_purpose": "start"}
+        beat_info = {"current_beat_id": "m1", "beat_plot": "start"}
 
         with (
             patch.object(bridge.ss, "get_plan", return_value=object()),

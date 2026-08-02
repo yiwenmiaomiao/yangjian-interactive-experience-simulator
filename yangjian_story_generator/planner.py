@@ -7,12 +7,11 @@ from __future__ import annotations
 
 import json
 import os
-import sys
-from dataclasses import asdict
 from typing import Any, Mapping
 
 from .codec import story_plan_from_dict, story_plan_to_json, story_plan_public_summary
 from .generator import StoryBrief, StoryGenerator, GeneratedPlanInvalidError
+from .llm_bridge import call_llm
 from .models import (
     CharacterContext,
     PreferenceSnapshot,
@@ -70,22 +69,10 @@ def _load_outline_style() -> str:
 # ── 模型适配器（用 room 的 llm 模块） ────────────────────────
 
 
-def _call_llm(system: str, user: str, temperature: float = 0.7, max_tokens: int = 8000) -> str:
-    """调用 room 的 llm 模块生成故事计划。"""
-    sys.path.insert(0, os.path.join(PROJECT_DIR, "room"))
-    import llm as room_llm
-    return room_llm.call(
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-
-
 class HermesModelClient:
     """适配 Hermes 模型栈的 StructuredModelClient。"""
 
-    def __init__(self, temperature: float = 0.7, max_tokens: int = 8000) -> None:
+    def __init__(self, temperature: float = 0.7, max_tokens: int = 128000) -> None:
         self._temperature = temperature
         self._max_tokens = max_tokens
 
@@ -93,9 +80,10 @@ class HermesModelClient:
         """调用模型生成 StoryPlan 结构的 JSON。"""
         system_prompt = self._build_system_prompt(payload)
         user_prompt = self._build_user_prompt(payload)
-        raw = _call_llm(
+        raw = call_llm(
             system=system_prompt,
             user=user_prompt,
+            agent_id="story_generator.plan",
             temperature=self._temperature,
             max_tokens=self._max_tokens,
         )
@@ -130,40 +118,43 @@ class HermesModelClient:
 ## 用户偏好快照
 {json.dumps(preferences, ensure_ascii=False, indent=2)}
 
+## 副线（side_arcs）结构规则
+副线不通过 unlock 条件触发，而是通过主线 beat 的 transition 进入：
+- 主线某 beat（如 m2）的某个 transition，其 target_id 指向副线首个 beat（如 s1_1）；当该 transition 的 goal 满足时，故事推进进入副线。
+- 副线内部 beat 之间通过 transition 串联（如 s1_1 -> s1_2）。
+- 副线完成后，最后一个 beat 的 transition 必须指向主线 beat，且必须是“进入副线前那个主线 beat 的下一个主线 beat”（例如从 m2 进入副线，则副线末 beat 指向 m3）。
+- 副线之间不能直接跳转（一个副线的 beat 不能 transition 到另一个副线的 beat）。
+- 副线不再拥有 endings 字段；副线通过 transition 回归主线。
+
 ## 输出 JSON 结构
 你必须输出严格的 JSON，格式如下：
 
 {{
   "story_id": "{brief.get('story_id', 'story_1')}",
-  "schema_version": 1,
   "created_at": "{brief.get('created_at', '')}",
-  "character_snapshot_version": "{character.get('source_version', 'v1')}",
-  "preference_snapshot_version": {preferences.get('profile_version', 1)},
-  "story_standard_version": 1,
   "premise": "故事前提",
   "theme": "核心主题",
   "main_arc": {{
-    "arc_id": "main",
     "goal": "主线目标描述",
-    "start_beat_id": "m1",
-    "milestones": ["信任建立", "秘密揭露", ...],
     "beats": [
       {{
         "beat_id": "m1",
-        "purpose": "这个beat的目的",
-        "goal": "用户在这个beat需要达成的目标（如：发现杨戬的异常、获得关键信息、做出选择等）",
-        "max_turns": 6,
+        "plot": "这个beat的剧情描述",
         "participants": ["user", "yangjian"],
-        "prerequisites": [],
         "allowed_information": [],
-        "forbidden_reveals": [],
+        "forbidden_information": [],
         "npc_requirement_ids": [],
-        "reconverges_at": null,
+        "diversion_allowed": false,
+        "world_day": "第一天",
+        "time_of_day": "清晨",
+        "weather": "薄雾微凉",
+        "location": "灌江口·杨府",
+        "mood": "平静",
         "transitions": [
           {{
             "transition_id": "m1_to_m2",
             "target_id": "m2",
-            "conditions": [],
+            "goal": "满足此方向推进的条件（如：用户发现了密室、用户选择与杨戬合作等）",
             "preserved_consequences": ["用户做了什么的重要事实"]
           }}
         ]
@@ -173,7 +164,6 @@ class HermesModelClient:
       {{
         "ending_id": "main_end",
         "summary": "结局A描述",
-        "conditions": []
       }}
     ]
   }},
@@ -182,29 +172,65 @@ class HermesModelClient:
       "arc_id": "side_1",
       "purpose": "副线目的",
       "impact_on_main_arc": ["对主线的影响"],
-      "unlock": {{
-        "minimum_main_progress": 0.3,
-        "required_milestones": ["milestone_name"],
-        "required_flags": []
-      }},
-      "start_beat_id": "s1_1",
-      "beats": [...],
-      "endings": [...],
+      "beats": [
+        {{
+          "beat_id": "s1_1",
+          "plot": "副线首 beat 剧情",
+          "participants": ["user", "yangjian"],
+          "allowed_information": [],
+          "forbidden_information": [],
+          "npc_requirement_ids": ["npc_req_1"],
+          "diversion_allowed": false,
+          "world_day": "第一天",
+          "time_of_day": "黄昏",
+          "weather": "阴",
+          "location": "灌江口·集市",
+          "mood": "紧张",
+          "transitions": [
+            {{
+              "transition_id": "s1_1_to_s1_2",
+              "target_id": "s1_2",
+              "goal": "副线推进条件",
+              "preserved_consequences": ["副线关键事实"]
+            }}
+          ]
+        }},
+        {{
+          "beat_id": "s1_2",
+          "plot": "副线末 beat 剧情",
+          "participants": ["user", "yangjian"],
+          "allowed_information": [],
+          "forbidden_information": [],
+          "npc_requirement_ids": ["npc_req_1"],
+          "diversion_allowed": false,
+          "world_day": "第一天",
+          "time_of_day": "入夜",
+          "weather": "雨",
+          "location": "灌江口·集市",
+          "mood": "缓和",
+          "transitions": [
+            {{
+              "transition_id": "s1_2_to_m3",
+              "target_id": "m3",
+              "goal": "副线结束、回归主线的条件",
+              "preserved_consequences": ["副线对主线的影响事实"]
+            }}
+          ]
+        }}
+      ],
       "npc_requirements": [
         {{
           "requirement_id": "npc_req_1",
           "story_id": "story_1",
-          "side_arc_id": "side_1",
+          "arc_id": "side_1",
           "narrative_function": "catalyst",
           "purpose": "NPC的目的",
-          "background_requirement": "背景",
+          "npc_background": "背景",
           "relation_to_yangjian": "与杨戬的关系",
           "relation_to_user": "与用户的关系",
           "current_goal": "当前目标",
           "must_know": [],
           "must_not_know": ["main_ending"],
-          "entry_condition": "",
-          "exit_condition": "",
           "reusable": false,
           "constraints": []
         }}
@@ -234,9 +260,7 @@ class HermesModelClient:
     }}
   ],
   "secrets": [],
-  "foreshadowing": [],
-  "global_constraints": [],
-  "forbidden_reveals": ["main_ending"]
+  "global_constraints": []
 }}
 
 不要输出 markdown 包裹，只输出纯 JSON。"""
@@ -258,12 +282,6 @@ class HermesModelClient:
 
 def _sanitize_plan(data: dict[str, Any]) -> dict[str, Any]:
     """清理模型输出中的常见格式问题。"""
-    # 清理 foreshadowing——移除缺失字段的条目
-    if "foreshadowing" in data:
-        data["foreshadowing"] = [
-            f for f in data["foreshadowing"]
-            if isinstance(f, dict) and f.get("foreshadowing_id") and f.get("setup_beat_id") and f.get("payoff_beat_id")
-        ]
     # 清理 secrets
     if "secrets" in data:
         data["secrets"] = [
@@ -338,6 +356,7 @@ def generate_story_plan(
     model = HermesModelClient(temperature=temperature)
     generator = StoryGenerator(model, standard=standard)
 
+    last_error: Exception | None = None
     for attempt in range(1 + max_retries):
         try:
             return generator.generate(
@@ -345,11 +364,23 @@ def generate_story_plan(
                 preferences=preferences,
                 brief=brief,
             )
-        except GeneratedPlanInvalidError as e:
+        except (GeneratedPlanInvalidError, ValueError, KeyError, TypeError) as e:
+            last_error = e
+            reason = ""
+            if isinstance(e, GeneratedPlanInvalidError):
+                reason = ", ".join(issue.code for issue in e.report.issues)
+            else:
+                reason = f"{type(e).__name__}: {e}"
+            print(
+                f"[story_generator] 生成失败 attempt={attempt + 1}/{max_retries + 1} "
+                f"reason={reason[:200]}",
+                flush=True,
+            )
             if attempt < max_retries:
-                # 可以在此记录失败原因 e.report
                 continue
             raise
+    assert last_error is not None
+    raise last_error
 
 
 async def generate_story_plan_async(

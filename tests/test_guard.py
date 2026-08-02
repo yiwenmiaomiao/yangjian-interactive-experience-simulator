@@ -21,7 +21,6 @@ def context(**overrides) -> DirectorContext:
         },
         "allowed_source_references": frozenset({"beat_1", "side_1"}),
         "unlocked_next_beats": frozenset({"beat_2"}),
-        "unlocked_side_arcs": frozenset({"side_1"}),
         "allowed_state_change_keys": frozenset({"trust", "clue_found"}),
         "proposal_ids": frozenset({"proposal_1", "proposal_2"}),
         "available_npc_profiles": frozenset({"profile_1"}),
@@ -64,7 +63,6 @@ def directive():
             }
         ],
         "desired_progress": "maintain",
-        "selected_side_arc": None,
         "narration": {
             "required": False,
             "purpose": "none",
@@ -137,14 +135,6 @@ class DirectiveGuardTests(unittest.TestCase):
             "INFORMATION_NOT_ALLOWED",
             {issue.code for issue in report.issues},
         )
-
-    def test_rejects_locked_side_arc(self) -> None:
-        payload = directive()
-        payload["selected_side_arc"] = "side_locked"
-
-        report = validate_directive(payload, context())
-
-        self.assertIn("SIDE_ARC_LOCKED", {issue.code for issue in report.issues})
 
     def test_rejects_idle_directive_without_progress(self) -> None:
         payload = directive()

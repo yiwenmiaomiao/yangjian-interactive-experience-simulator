@@ -67,7 +67,6 @@ class EnvelopeTests(unittest.TestCase):
             }],
             "npc_commands": [],
             "desired_progress": "maintain",
-            "selected_side_arc_id": None,
             "narration_request": None,
             "fallback_world_event": None,
         }

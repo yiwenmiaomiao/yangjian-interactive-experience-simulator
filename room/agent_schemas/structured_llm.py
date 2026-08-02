@@ -76,16 +76,9 @@ def schema_to_json_object_format(
     )
     schema = _inject_target_pool_enum(schema, pool)
     response_format = {"type": "json_object"}
-    pool_line = (
-        f"\n本回合可调度 target 池（tasks.target / user_turn.target 只能从这里选）："
-        f"{json.dumps(pool, ensure_ascii=False)}"
-        if pool
-        else ""
-    )
     hint = (
         "你必须只输出一个 JSON 对象（不要 markdown 代码块，不要额外说明），"
-        f"并尽量符合以下 JSON Schema（模型名 {model.__name__}）："
-        f"{pool_line}\n"
+        f"并尽量符合以下 JSON Schema（模型名 {model.__name__}）：\n"
         + json.dumps(schema, ensure_ascii=False)
     )
     return response_format, hint

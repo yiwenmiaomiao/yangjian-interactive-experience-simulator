@@ -20,7 +20,6 @@ from yangjian_story_generator import (
     StoryGenerator,
     StoryPlan,
     StoryPlanValidator,
-    UnlockRule,
     story_plan_from_json,
     story_plan_public_summary,
     story_plan_to_dict,
@@ -30,20 +29,22 @@ from yangjian_story_generator import (
 
 def valid_plan() -> StoryPlan:
     main = MainArc(
-        arc_id="main",
         goal="Develop the relationship between the user and Yang Jian.",
-        start_beat_id="m1",
-        milestones=("trust_established",),
         beats=(
             StoryBeat(
                 beat_id="m1",
-                purpose="Establish a shared problem.",
+                plot="Establish a shared problem.",
                 participants=("user", "yangjian"),
                 transitions=(
                     BranchTransition(
                         transition_id="m1_to_end",
                         target_id="main_end",
                         preserved_consequences=("shared_problem_acknowledged",),
+                    ),
+                    BranchTransition(
+                        transition_id="m1_to_s1",
+                        target_id="s1",
+                        goal="An external event pulls the user into the side arc.",
                     ),
                 ),
             ),
@@ -58,10 +59,10 @@ def valid_plan() -> StoryPlan:
     npc = NPCRequirement(
         requirement_id="npc_req_1",
         story_id="story_1",
-        side_arc_id="side_1",
+        arc_id="side_1",
         narrative_function=NarrativeFunction.CATALYST,
         purpose="Introduce a side event that tests cooperation.",
-        background_requirement="Fits the current world.",
+        npc_background="Fits the current world.",
         relation_to_yangjian="Acquaintance",
         relation_to_user="Stranger",
         current_goal="Request assistance.",
@@ -71,40 +72,26 @@ def valid_plan() -> StoryPlan:
         arc_id="side_1",
         purpose="Test cooperation through a temporary event.",
         impact_on_main_arc=("Changes mutual trust.",),
-        unlock=UnlockRule(
-            minimum_main_progress=0.3,
-            required_milestones=("trust_established",),
-        ),
-        start_beat_id="s1",
         beats=(
             StoryBeat(
                 beat_id="s1",
-                purpose="Respond to the NPC request.",
+                plot="Respond to the NPC request.",
                 participants=("user", "yangjian", "npc_1"),
                 npc_requirement_ids=("npc_req_1",),
                 transitions=(
                     BranchTransition(
-                        transition_id="s1_to_end",
-                        target_id="side_end",
+                        transition_id="s1_to_main_end",
+                        target_id="main_end",
+                        goal="The side event concludes and the story returns to the main arc.",
                     ),
                 ),
-            ),
-        ),
-        endings=(
-            Ending(
-                ending_id="side_end",
-                summary="The temporary event concludes.",
             ),
         ),
         npc_requirements=(npc,),
     )
     return StoryPlan(
         story_id="story_1",
-        schema_version=1,
         created_at="2026-07-30T00:00:00Z",
-        character_snapshot_version="character-v1",
-        preference_snapshot_version=1,
-        story_standard_version=1,
         premise="A private test premise.",
         theme="Trust",
         main_arc=main,
@@ -126,7 +113,6 @@ def valid_plan() -> StoryPlan:
                 story_bindings=("side_1", "s1"),
             ),
         ),
-        forbidden_reveals=("main_ending",),
     )
 
 
@@ -153,7 +139,7 @@ class StoryValidationTests(unittest.TestCase):
         plan = valid_plan()
         orphan = StoryBeat(
             beat_id="orphan",
-            purpose="This beat is disconnected.",
+            plot="This beat is disconnected.",
             participants=("user", "yangjian"),
             transitions=(
                 BranchTransition(
@@ -198,7 +184,7 @@ class StoryValidationTests(unittest.TestCase):
         npc = replace(
             side.npc_requirements[0],
             story_id="other_story",
-            side_arc_id="other_arc",
+            arc_id="other_arc",
         )
         invalid = replace(
             plan,

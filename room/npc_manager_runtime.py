@@ -135,7 +135,7 @@ def execute_command(
     *,
     profile_spec: Any | None,
     story_id: str,
-    side_arc_id: str,
+    arc_id: str,
 ) -> dict[str, Any]:
     """Execute a validated Director NPC command deterministically."""
     command_id = str(command.get("command_id", ""))
@@ -156,7 +156,7 @@ def execute_command(
             record = activate(
                 npc_id,
                 story_id=story_id,
-                side_arc_id=side_arc_id,
+                arc_id=arc_id,
                 scene_id=str(command.get("target_scene_id") or ""),
                 reason=str(command.get("reason") or "Director activated NPC"),
             )
@@ -189,7 +189,7 @@ def execute_command(
         }
 
 
-def acquire_for_side_arc(requirement: Any, side_arc_id: str) -> str | None:
+def acquire_for_arc(requirement: Any, arc_id: str) -> str | None:
     """Compatibility adapter for old callers; never invokes a runtime LLM."""
     try:
         import story_state
@@ -205,7 +205,7 @@ def activate(
     npc_id: str,
     *,
     story_id: str = "story_1",
-    side_arc_id: str = "",
+    arc_id: str = "",
     scene_id: str = "",
     reason: str = "Director activated NPC",
 ):
@@ -216,7 +216,7 @@ def activate(
     return manager.activate(
         npc_id,
         story_id=story_id,
-        side_arc_id=side_arc_id,
+        arc_id=arc_id,
         scene_id=scene_id,
         reason=reason,
     )

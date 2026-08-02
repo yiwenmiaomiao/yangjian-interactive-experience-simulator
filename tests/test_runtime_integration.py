@@ -28,11 +28,10 @@ class DirectorRuntimeContractTests(unittest.TestCase):
             "story_id": "story_1",
             "current_beat_id": "m1",
             "allowed_information": ["visible_fact"],
-            "forbidden_reveals": ["hidden_fact"],
+            "forbidden_information": ["hidden_fact"],
             "available_transitions": [
                 {"transition_id": "to_m2", "target_id": "m2"}
             ],
-            "available_side_arcs": [],
         }
 
     def test_direct_guard_rejects_information_not_whitelisted_by_room(self) -> None:
@@ -64,7 +63,6 @@ class DirectorRuntimeContractTests(unittest.TestCase):
                 "success_condition": "产生符合角色的行动",
             }],
             "desired_progress": "maintain",
-            "selected_side_arc": None,
             "narration": {
                 "required": False,
                 "purpose": "none",

@@ -138,7 +138,7 @@ def story_plan_status() -> str:
         "status": state.get("status"),
         "current_beat_id": state.get("current_beat_id"),
         "main_progress": state.get("main_progress"),
-        "beat_info": beat.get("beat_purpose", "") if not beat.get("error") else beat["error"],
+        "beat_info": beat.get("beat_plot", "") if not beat.get("error") else beat["error"],
         "completed_beats": len(state.get("completed_beats", [])),
         "flags": state.get("flags", {}),
         "in_recovery": state.get("in_recovery", False),
@@ -146,6 +146,7 @@ def story_plan_status() -> str:
 
 
 # ── 回归剧情生成 ──────────────────────────────────────────
+
 
 
 def _trigger_recovery(ss_state: dict[str, Any], user_message: str, decision: dict[str, Any]) -> None:
@@ -157,22 +158,56 @@ def _trigger_recovery(ss_state: dict[str, Any], user_message: str, decision: dic
         return
 
     current_beat_id = ss_state.get("current_beat_id", "")
-    current_beat_purpose = ""
-    current_beat_goal = ss_state.get("beat_goal", "")
+    current_beat_plot = ""
     for beat in plan.main_arc.beats:
         if beat.beat_id == current_beat_id:
-            current_beat_purpose = beat.purpose
+            current_beat_plot = beat.plot
             break
 
     # 找下个主线 beat 作为回归目标
     rejoin_target = ""
+    _is_last_beat = False
     for i, beat in enumerate(plan.main_arc.beats):
         if beat.beat_id == current_beat_id:
             if i + 1 < len(plan.main_arc.beats):
                 rejoin_target = plan.main_arc.beats[i + 1].beat_id
+            else:
+                _is_last_beat = True
             break
-    if not rejoin_target and plan.main_arc.beats:
-        rejoin_target = plan.main_arc.beats[0].beat_id
+
+    # Bug4 修复：如果当前 beat 是最后一个主线 beat，不进 recovery，
+    # 直接推进到结局（如果有结局可选）或标记故事完成
+    if _is_last_beat or not rejoin_target:
+        endings = [e.ending_id for e in plan.main_arc.endings]
+        if endings:
+            # 推进到第一个可用结局
+            rejoin_target = endings[0]
+            ss.advance_beat(ss_state, rejoin_target)
+            bi = ss.get_current_beat_info(ss_state)
+            director.set_story_context(bi)
+            log_event(
+                LangfuseCtx(),
+                "room.last_beat_force_ending",
+                output_data={
+                    "beat_id": current_beat_id,
+                    "ending_id": rejoin_target,
+                },
+                level="WARNING",
+            )
+            return
+        else:
+            # 没有结局定义，标记故事完成
+            ss_state["status"] = "completed"
+            ss.save_state(ss_state)
+            log_event(
+                LangfuseCtx(),
+                "room.story_completed_no_ending",
+                output_data={"beat_id": current_beat_id},
+                level="WARNING",
+            )
+            return
+
+    # 不再 fallback 到 beats[0]
 
     recovery_id = f"recovery_{current_beat_id}"
 
@@ -195,7 +230,7 @@ def _trigger_recovery(ss_state: dict[str, Any], user_message: str, decision: dic
         "      \"purpose\": \"利用用户当前关注点自然引向下一节点\",\n"
         "      \"participants\": [\"user\", \"yangjian\"],\n"
         "      \"allowed_information\": [],\n"
-        "      \"forbidden_reveals\": [\"main_ending\"],\n"
+        "      \"forbidden_information\": [\"main_ending\"],\n"
         "      \"transitions\": [\n"
         "        {\"transition_id\": \"r1_to_rejoin\", \"target_id\": \"" + rejoin_target + "\", \"preserved_consequences\": [\"用户已接受当前局面\"]}\n"
         "      ]\n"
@@ -207,8 +242,8 @@ def _trigger_recovery(ss_state: dict[str, Any], user_message: str, decision: dic
     user_prompt = (
         f"## 用户最新消息\n{user_message[:200]}\n\n"
         f"## 当前主线 Beat\nID: {current_beat_id}\n"
-        f"目的: {current_beat_purpose[:200]}\n"
-        f"节点目标: {current_beat_goal[:200]}\n\n"
+        f"目的: {current_beat_plot[:200]}\n"
+    
         f"## 主线目标\n{plan.main_arc.goal[:200]}\n\n"
         f"## 回归目标 Beat\n{rejoin_target}\n\n"
         f"## 要求\n"
@@ -245,7 +280,7 @@ def _trigger_recovery(ss_state: dict[str, Any], user_message: str, decision: dic
                     "purpose": b["purpose"],
                     "participants": b.get("participants", ["user", "yangjian"]),
                     "allowed_information": b.get("allowed_information", []),
-                    "forbidden_reveals": b.get("forbidden_reveals", ["main_ending"]),
+                    "forbidden_information": b.get("forbidden_information", ["main_ending"]),
                     "transitions": b.get("transitions", [{"transition_id": f"{b['beat_id']}_to_rejoin", "target_id": rejoin_target}]),
                 })
 
@@ -255,13 +290,10 @@ def _trigger_recovery(ss_state: dict[str, Any], user_message: str, decision: dic
                 recovery_beats,
                 rejoin_target,
                 sub_goal=sub_goal,
-                max_turns=4,
+                max_turns=ss.RECOVERY_MAX_TURNS_DEFAULT,
             )
-            # 设置 recovery beat 的 goal
-            ss_state["beat_goal"] = sub_goal
-            ss_state["beat_max_turns"] = 4
-            ss.save_state(ss_state)
-            # 更新 beat_info 缓存让导演使用
+            # recovery 是 beat 内支线，不覆盖 beat_goal/beat_max_turns
+            # 更新 beat_info 缓存让导演使用（叠加 recovery 上下文）
             bi = ss.get_current_beat_info(ss_state)
             director.set_story_context(bi)
     except (json.JSONDecodeError, KeyError):
@@ -298,14 +330,14 @@ def _generate_recovery_transition(
         return ""
 
     # 找到 rejoin_target 的 beat purpose
-    target_purpose = ""
+    target_plot = ""
     target_beat = ss._find_beat(plan, rejoin_target)
     if target_beat:
-        target_purpose = target_beat.purpose
+        target_plot = target_beat.plot
 
     # 找当前 recovery 的子目标
     sub_goal = ss_state.get("recovery_sub_goal", "")
-    current_beat_purpose = bi.get("beat_purpose", "")
+    current_beat_plot = bi.get("beat_plot", "")
 
     system = (
         "你是杨戬项目的旁白。用户在剧情缓冲段停留过久，现在需要强行推进到下一个剧情节点。\n"
@@ -318,10 +350,10 @@ def _generate_recovery_transition(
         "5. 用第二人称'你'视角"
     )
     prompt = (
-        f"当前剧情节点目的：{current_beat_purpose[:200]}\n"
+        f"当前剧情节点：{current_beat_plot[:200]}\n"
         f"缓冲段子目标：{sub_goal[:200]}\n"
         f"下一剧情节点：{rejoin_target}\n"
-        f"下一节点目的：{target_purpose[:200]}\n"
+        f"下一节点剧情：{target_plot[:200]}\n"
         f"用户最后的行为：{user_message[:200]}\n\n"
         f"请写一段过渡旁白。"
     )
@@ -422,18 +454,22 @@ def tick(
                 "thread_id": thread_id,
             },
         )
-        with room_phase(lf_ctx, "room.load_state"):
+        with room_phase(lf_ctx, "room.load_state") as phase_bag:
             state = state_manager.load()
+            import story_state as ss
+            plan = ss.get_plan() or ss.load_plan()
+            persisted_story = ss.load_state()
+            if isinstance(phase_bag, dict):
+                phase_bag["output"] = _story_state_snapshot(
+                    persisted_story, state
+                )
         lf_ctx.tick = int(state.get("tick", 0)) + 1
         lf_ctx.turn_id = f"turn_{lf_ctx.tick}"
         if user_message:
             _capture_explicit_preferences(user_message, user_id)
 
-        import story_state as ss
-        plan = ss.get_plan() or ss.load_plan()
-        persisted_story = ss.load_state()
         _story_plan_active = bool(
-            plan and persisted_story.get("status") == "active"
+            plan and persisted_story.get("status") in ("active", "completed")
         )
         log_event(
             lf_ctx,
@@ -454,9 +490,9 @@ def tick(
             )
             lf_ctx.beat_id = str(beat_info.get("current_beat_id", ""))
 
-        # ── 两阶段调度：故事计划模式走 DIRECT → RESOLVE ──
+        # ── 故事线模式：DIRECT → ACT → RESOLVE ──
         if _story_plan_active:
-            result = _tick_two_stage(
+            result = _tick_storyline(
                 state, user_message, source, lf_ctx=lf_ctx
             )
             log_event(
@@ -530,8 +566,10 @@ def tick(
             else:
                 outputs.append({"role": role, "text": f"【{role} 没有对应的 Agent】"})
         
-        # 应用世界变更
+        # 应用世界变更（scene / world_day 由 story plan beat 定义，Director 不再裁定）
         changes = decision.get("world_changes", {})
+        changes = {k: v for k, v in changes.items()
+                   if k not in ("weather", "current_weather", "mood", "world_day")}
         if changes:
             state = state_manager.apply_changes(state, changes)
         
@@ -583,10 +621,6 @@ def tick(
                 if not ss_state.get("in_recovery") and ss.check_beat_max_turns(ss_state):
                     _trigger_recovery(ss_state, user_message or "", decision)
 
-                # 检查副线解锁
-                newly = ss.check_and_unlock_side_arcs(ss_state)
-                if newly:
-                    decision.setdefault("notes", []).append(f"副线解锁: {', '.join(newly)}")
         
         state["tick"] = state.get("tick", 0) + 1
         
@@ -659,8 +693,49 @@ def tick_with_story(user_message=None, source="cron"):
 # ── 两阶段故事计划 tick ──────────────────────────────────
 
 
-def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
-    """故事计划模式的两阶段 tick：DIRECT -> Agent行动 -> RESOLVE -> Room保存。"""
+def _story_state_snapshot(ss_state: dict[str, Any], world_state: dict[str, Any]) -> dict[str, Any]:
+    """全量记录 room 状态快照，用于 trace 开始/结束及 load_state 对比。
+
+    字段按职责分组：beat / recovery，方便排查 tick 前后变化。
+    """
+    import story_state as ss
+    scene = world_state.get("scene", {}) or {}
+    rel = dict(ss_state.get("relationship", {}))
+    rel.pop("history", None)
+    return {
+        "tick": world_state.get("tick", 0),
+        "world_day": world_state.get("world_day", 1),
+        "scene": {
+            "location": scene.get("location", ""),
+            "weather": scene.get("weather", ""),
+            "time_of_day": scene.get("time_of_day", ""),
+            "mood": scene.get("mood", ""),
+        },
+        "beat": {
+            "story_id": ss_state.get("story_id", ""),
+            "status": ss_state.get("status", ""),
+            "current_beat_id": ss_state.get("current_beat_id", ""),
+            "beat_tick_counter": ss_state.get("beat_tick_counter", 0),
+            "main_progress": ss_state.get("main_progress", 0.0),
+            "completed_beats": list(ss_state.get("completed_beats", [])),
+            "completed_endings": list(ss_state.get("completed_endings", [])),
+            "active_side_arc": ss.get_active_side_arc(ss_state),
+        },
+        "recovery": {
+            "in_recovery": ss_state.get("in_recovery", False),
+            "recovery_arc_id": ss_state.get("recovery_arc_id"),
+            "recovery_rejoin_target": ss_state.get("recovery_rejoin_target"),
+            "recovery_sub_goal": ss_state.get("recovery_sub_goal", ""),
+            "recovery_max_turns": ss_state.get("recovery_max_turns", ss.RECOVERY_MAX_TURNS_DEFAULT),
+            "recovery_sub_goal_met": ss_state.get("recovery_sub_goal_met", False),
+            "recovery_tick_counter": ss_state.get("recovery_tick_counter", 0),
+        },
+        "relationship": rel,
+    }
+
+
+def _tick_storyline(state, user_message=None, source="cron", lf_ctx=None):
+    """故事线模式 tick：DIRECT -> ACT -> RESOLVE。"""
     import story_state as ss
 
     _beat_advanced = False  # 标记 beat 是否在本回合推进
@@ -670,11 +745,19 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
     if ss_state.get("status") != "active":
         log_event(
             lf_ctx or LangfuseCtx(),
-            "room.two_stage_inactive",
+            "room.storyline_inactive",
             output_data={"status": ss_state.get("status")},
             level="WARNING",
         )
-        return _tick_traditional_fallback(state, user_message, source)
+        # 故事线已完成或未激活，进入自由聊天模式
+        return _tick_free_chat(state, user_message, source, lf_ctx)
+
+    # ── trace 开始：记录 story state + recovery 全量快照 ──
+    log_event(
+        lf_ctx or LangfuseCtx(),
+        "room.trace_start",
+        output_data=_story_state_snapshot(ss_state, state),
+    )
 
     # 初始化 Langfuse 日志上下文
     if lf_ctx is None:
@@ -698,6 +781,18 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
     # 刷新导演上下文。Story Generator 的完整 NPC Profile 只交给
     # NPC Manager；Director 只能看到可引用的 profile_id。
     bi = ss.get_current_beat_info(ss_state)
+
+    # 从 story plan beat 读取场景状态并更新 world_state
+    _scene = state.setdefault("scene", {})
+    for _field in ("location", "weather", "time_of_day", "mood"):
+        _val = bi.get(_field, "")
+        if _val:
+            _scene[_field] = _val
+    _wd = bi.get("world_day", "")
+    if _wd:
+        state["world_day"] = _wd
+    state_manager.save(state)
+
     requirements = ss.get_current_npc_requirements(ss_state)
     profile_specs = {
         profile.profile_id: profile
@@ -722,6 +817,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
     # 注入 story_facts 摘要让所有 agent 可见
     import story_facts as sf
     bi["facts_summary"] = sf.get_facts_summary()
+
     bi["npc_profiles"] = [
         {
             "profile_id": profile.profile_id,
@@ -749,13 +845,14 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
         "room.status",
         output_data={
             "beat_id": bi.get("current_beat_id"),
-            "beat_purpose": bi.get("beat_purpose", ""),
-            "beat_goal": bi.get("beat_goal", ""),
-            "beat_max_turns": bi.get("beat_max_turns", 6),
+            "beat_purpose": bi.get("beat_plot", ""),
             "beat_tick_counter": bi.get("beat_tick_counter", 0),
             "in_recovery": ss_state.get("in_recovery", False),
             "recovery_arc_id": ss_state.get("recovery_arc_id"),
             "recovery_rejoin_target": ss_state.get("recovery_rejoin_target"),
+            "recovery_sub_goal": ss_state.get("recovery_sub_goal", ""),
+            "recovery_tick_counter": ss_state.get("recovery_tick_counter", 0),
+            "recovery_max_turns": ss_state.get("recovery_max_turns", ss.RECOVERY_MAX_TURNS_DEFAULT),
             "completed_beats": ss_state.get("completed_beats", []),
             "main_progress": ss_state.get("main_progress", 0.0),
             "scene_location": scene.get("location", ""),
@@ -763,7 +860,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             "scene_time_of_day": scene.get("time_of_day", ""),
             "scene_mood": scene.get("mood", ""),
             "allowed_information": bi.get("allowed_information", []),
-            "forbidden_reveals": bi.get("forbidden_reveals", []),
+            "forbidden_information": bi.get("forbidden_information", []),
             "available_transitions": [
                 {"target_id": t.get("target_id"), "consequences": t.get("preserved_consequences")}
                 for t in bi.get("available_transitions", [])
@@ -795,7 +892,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             story_cursor={
                 "story_id": bi.get("story_id", "story_1"),
                 "beat_id": bi.get("current_beat_id", ""),
-                "purpose": bi.get("beat_purpose", ""),
+                "plot": bi.get("beat_plot", ""),
             },
             world_snapshot=dict(state),
             available_actor_agents=tuple(
@@ -820,9 +917,6 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             npc_registry=registry,
             unlocked_transitions=tuple(
                 bi.get("available_transitions", ())
-            ),
-            available_side_arcs=tuple(
-                bi.get("available_side_arcs", ())
             ),
             recent_confirmed_events=tuple(
                 state.get("confirmed_events", ())[-20:]
@@ -868,8 +962,8 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                 command,
                 profile_spec=profile_specs.get(profile_id),
                 story_id=bi.get("story_id", "story_1"),
-                side_arc_id=(
-                    requirement.side_arc_id if requirement is not None else ""
+                arc_id=(
+                    requirement.arc_id if requirement is not None else ""
                 ),
             )
         )
@@ -891,6 +985,22 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
     resolve_gate = directive.get("resolve_gate") or {}
     resolve_required = resolve_gate.get("required", True) is not False
     act_required = resolve_gate.get("act_required", True) is not False
+
+    # ── Bug2 修复：room 判定 beat_tick_counter 达到 max_turns 时强制走 RESOLVE ──
+    _beat_max = ss.BEAT_MAX_TURNS_DEFAULT
+    _beat_tick = ss_state.get("beat_tick_counter", 0)
+    if _beat_max > 0 and _beat_tick >= _beat_max and not resolve_required:
+        resolve_required = True
+        log_event(
+            lf_ctx,
+            "room.force_resolve_max_turns",
+            output_data={
+                "beat_id": bi.get("current_beat_id"),
+                "tick_counter": _beat_tick,
+                "max_turns": _beat_max,
+            },
+            level="WARNING",
+        )
 
     # ═══ Phase 2a: Narration 优先 ═══
     # 有 narration 需求时先执行 narrator（旁白揭示环境），输出后再执行 actor。
@@ -995,18 +1105,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                 narrator.handle_message(narrator_request_message).payload
             )
             narration = str(draft.get("text", ""))
-            # narrator 回写场景地点
-            narration_location = draft.get("location")
-            if narration_location and isinstance(narration_location, str):
-                scene = state.setdefault("scene", {})
-                if scene.get("location", "") != narration_location:
-                    scene["location"] = narration_location
-                    state_manager.save(state)
-                    log_event(
-                        lf_ctx,
-                        "room.scene_location_from_narrator",
-                        output_data={"location": narration_location},
-                    )
+            # scene（含 location）由 story plan beat 定义，narrator 不再回写
             if narration and not draft.get("contains_dialogue"):
                 narration_output = {
                     "role": request.narration_type,
@@ -1258,7 +1357,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
     # Flush so Langfuse shows the gate even while RESOLVE LLM is still running.
     lf_flush(lf_ctx)
 
-    forbidden_fragments = list(bi.get("forbidden_reveals", []))
+    forbidden_fragments = list(bi.get("forbidden_information", []))
     for task in directive.get("actor_tasks", []):
         forbidden_fragments.extend(task.get("constraints", []))
 
@@ -1487,26 +1586,27 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                 confirmed_event_ids=tuple(o.get("confirmed_event_ids", ())),
             )
 
-    # 应用 scene_update（来自 director directive）
+    # scene / world_day 由 story plan beat 定义，Director 不再裁定
     import story_facts as sf
-    scene_update = directive.get("scene_update")
-    if scene_update and isinstance(scene_update, dict):
-        changes = {}
-        for k in ("location", "weather", "time_of_day", "mood"):
-            v = scene_update.get(k)
-            if v is not None:
-                changes[k] = v
-        if changes:
-            state = state_manager.apply_changes(state, {"scene_update": changes})
 
-    # 应用 resolution 中的状态变更
+    # 应用 resolution 中的状态变更，持久化到 story_state
     for change in resolution.get("state_changes", []):
         key = change.get("key", "")
         value = change.get("value")
         if key and value is not None:
-            if key in {"weather", "mood", "world_day"}:
-                state = state_manager.apply_changes(state, {key: value})
             log_state_change(lf_ctx, key, value, source="resolve")
+            # 持久化到 story_state
+            if key.startswith("flag_"):
+                flag_key = key.replace("flag_", "")
+                ss_state.setdefault("flags", {})[flag_key] = value
+            elif key.startswith("unlock_side_"):
+                side_arc = key.replace("unlock_side_", "")
+                if side_arc not in ss_state.get("unlocked_side_arcs", []):
+                    ss_state.setdefault("unlocked_side_arcs", []).append(side_arc)
+            elif key == "beat_goal":
+                ss_state["beat_goal"] = value
+                ss_state["beat_goal_met"] = True
+            # 只更新 story_facts 内存
             if key.startswith("item_"):
                 item = key.replace("item_", "")
                 sf.set_item_location(item, str(value))
@@ -1515,17 +1615,8 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             elif key.startswith("character_"):
                 character = key.replace("character_", "")
                 sf.set_character_state(character, str(value))
-
-    # 应用 resolution 中的 scene_update
-    resolve_scene_update = resolution.get("scene_update")
-    if resolve_scene_update and isinstance(resolve_scene_update, dict):
-        resolve_changes = {}
-        for k in ("location", "weather", "time_of_day", "mood"):
-            v = resolve_scene_update.get(k)
-            if v is not None:
-                resolve_changes[k] = v
-        if resolve_changes:
-            state = state_manager.apply_changes(state, {"scene_update": resolve_changes})
+    # 保存 story_state
+    ss.save_state(ss_state)
 
     # 推进 beat（若有）
     next_beat = resolution.get("next_beat")
@@ -1584,31 +1675,28 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
         # 更新 director 缓存
         bi = ss.get_current_beat_info(ss.load_state())
         director.set_story_context(bi)
-        # 检查副线解锁
-        ss.check_and_unlock_side_arcs(ss.load_state())
         _beat_advanced = True
 
-    # beat goal 检测：director resolve 输出 goal_met
-    goal_met = resolution.get("goal_met", False)
+    # recovery 子目标自动检测：如果用户在当前回合有实质性行动，强制推进
+    # 因为 recovery 子目标通常是让用户主动行动（如"向杨戬搭话"），如果用户发了消息就认为目标达成
     sub_goal_met = resolution.get("sub_goal_met", False)
-
-    if goal_met and not _beat_advanced:
-        # goal 达成，推进到下一个 beat
-        transitions = bi.get("available_transitions", [])
-        if transitions:
-            next_beat_id = str(transitions[0].get("target_id", ""))
-            if next_beat_id:
-                ss.advance_beat(ss_state, next_beat_id)
-                bi = ss.get_current_beat_info(ss.load_state())
-                director.set_story_context(bi)
-                _beat_advanced = True
-                log_event(
-                    lf_ctx,
-                    "room.beat_goal_met",
-                    output_data={"next_beat": next_beat_id},
-                )
-
-    # recovery 子目标检测
+    if not _beat_advanced and ss_state.get("in_recovery"):
+        recovery_sub_goal = ss_state.get("recovery_sub_goal", "")
+        user_turn = directive.get("user_turn", {})
+        user_kind = user_turn.get("kind", "")
+        # 如果用户有实质性行动（对话、物理行动），自动判定子目标达成
+        if user_kind in ("dialogue", "physical_action") and user_message:
+            sub_goal_met = True
+            log_event(
+                lf_ctx,
+                "room.auto_sub_goal_met",
+                output_data={
+                    "reason": "user_action_detected",
+                    "user_kind": user_kind,
+                    "recovery_sub_goal": recovery_sub_goal,
+                },
+                level="WARNING",
+            )
     if not _beat_advanced and ss_state.get("in_recovery") and sub_goal_met:
         rejoin_target = ss.exit_recovery_arc(ss_state)
         if rejoin_target:
@@ -1618,30 +1706,34 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
             _beat_advanced = True
             log_event(
                 lf_ctx,
-                "room.recovery_sub_goal_met",
+                "room.recovery_exit",
                 output_data={"rejoin_target": rejoin_target},
             )
 
-    # 递增 beat tick（未推进时）
+    # 递增 tick（未推进时）
+    # recovery 时递增 recovery_tick_counter，不影响 beat_tick_counter
     if not _beat_advanced and ss_state.get("status") == "active":
-        ss.increment_beat_tick(ss_state)
+        if ss_state.get("in_recovery"):
+            ss.increment_recovery_tick(ss_state)
+        else:
+            ss.increment_beat_tick(ss_state)
 
-    # beat max_turns 检查：到达最大轮次但 goal 未达成 -> 进入 recovery
+    # beat max_turns 检查：到达最大轮次但未推进 -> 进入 recovery
+    # diversion_allowed=true 时跳过 recovery 判定
     if not _beat_advanced and not ss_state.get("in_recovery"):
-        if ss.check_beat_max_turns(ss_state):
+        if not bi.get("diversion_allowed", False) and ss.check_beat_max_turns(ss_state):
             log_event(
                 lf_ctx,
                 "room.beat_max_turns_reached",
                 output_data={
                     "tick_count": ss_state.get("beat_tick_counter", 0),
-                    "max_turns": ss_state.get("beat_max_turns", 6),
-                    "beat_goal": ss_state.get("beat_goal", ""),
+                    "max_turns": ss.BEAT_MAX_TURNS_DEFAULT,
                 },
                 level="WARNING",
             )
             _trigger_recovery(ss_state, user_message or "", resolution)
 
-    # recovery max_turns 检查：到达最大回合但子目标未达成 -> 强行退出 + narrator 过渡
+    # recovery max_turns 检查：到达最大回合但子目标未达成 -> 强行退出，推进到下一 beat
     if not _beat_advanced and ss_state.get("in_recovery"):
         if ss.check_recovery_max_turns(ss_state):
             rejoin_target = ss.exit_recovery_arc(ss_state)
@@ -1650,6 +1742,7 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                 transition_text = _generate_recovery_transition(
                     bi, rejoin_target, user_message or "", ss_state
                 )
+                # 超时强制退出：子目标都没达成，beat goal 不可能达成，直接推进
                 ss.advance_beat(ss_state, rejoin_target)
                 bi = ss.get_current_beat_info(ss.load_state())
                 director.set_story_context(bi)
@@ -1705,6 +1798,47 @@ def _tick_two_stage(state, user_message=None, source="cron", lf_ctx=None):
                 for item in outputs
             ],
         },
+    )
+    # ── 最终状态快照：记录 agent 行动后的最新 room 状态 ──
+    final_ss = ss.load_state()
+    final_scene = state.get("scene", {}) or {}
+    log_event(
+        lf_ctx,
+        "room.final_state",
+        output_data={
+            "tick": state.get("tick", 0),
+            "world_day": state.get("world_day", 1),
+            "scene": {
+                "location": final_scene.get("location", ""),
+                "weather": final_scene.get("weather", ""),
+                "time_of_day": final_scene.get("time_of_day", ""),
+                "mood": final_scene.get("mood", ""),
+            },
+            "beat": {
+                "story_id": final_ss.get("story_id", ""),
+                "status": final_ss.get("status", ""),
+                "current_beat_id": final_ss.get("current_beat_id", ""),
+                "beat_tick_counter": final_ss.get("beat_tick_counter", 0),
+                "main_progress": final_ss.get("main_progress", 0.0),
+                "completed_beats": list(final_ss.get("completed_beats", [])),
+                "completed_endings": list(final_ss.get("completed_endings", [])),
+            },
+            "recovery": {
+                "in_recovery": final_ss.get("in_recovery", False),
+                "recovery_arc_id": final_ss.get("recovery_arc_id"),
+                "recovery_rejoin_target": final_ss.get("recovery_rejoin_target"),
+                "recovery_sub_goal": final_ss.get("recovery_sub_goal", ""),
+                "recovery_tick_counter": final_ss.get("recovery_tick_counter", 0),
+            },
+            "relationship": dict(final_ss.get("relationship", {})),
+        },
+    )
+    # ── trace 结束：记录最终 story state + recovery 状态快照 ──
+    final_ss = ss.load_state()
+    log_event(
+        lf_ctx,
+        "room.trace_end",
+        output_data=_story_state_snapshot(final_ss, state),
     )
     return {
         "ok": True,
@@ -1831,10 +1965,10 @@ def _synthetic_confirmed_events_for_narration(
     # 兜底：无 brief/scene_facts 时用 beat 目的作为叙事锚点，
     # 保证 narrator 始终有素材可写（旁白是用户的眼睛，不能空转）
     if not events and bi:
-        beat_purpose = str(bi.get("beat_purpose", "")).strip()
+        beat_plot = str(bi.get("beat_plot", "")).strip()
         if beat_purpose:
             events.append({
-                "event_id": "confirmed_director_beat_purpose",
+                "event_id": "confirmed_director_beat_plot",
                 "event_type": "scene_anchor",
                 "summary": beat_purpose[:150],
                 "participants": [],
@@ -1858,34 +1992,10 @@ def _select_narration_spec(
     directive: dict[str, Any],
     resolution: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    inline_feedback = (directive.get("inline_effects") or {}).get("user_feedback")
-    if isinstance(inline_feedback, Mapping):
-        presentation = inline_feedback.get("presentation")
-        if isinstance(presentation, Mapping) and presentation.get("required"):
-            return {
-                "purpose": presentation.get("purpose", "visible_action"),
-                "timing": presentation.get("timing", "after_dialogue"),
-                "visible_fact_ids": list(
-                    inline_feedback.get("revealed_fact_ids", [])
-                ),
-                "max_characters": 100,
-                "style_profile": "concise",
-            }
-
-    user_outcome = (resolution or {}).get("user_outcome")
-    if isinstance(user_outcome, Mapping):
-        presentation = user_outcome.get("presentation")
-        if isinstance(presentation, Mapping) and presentation.get("required"):
-            return {
-                "purpose": presentation.get("purpose", "visible_action"),
-                "timing": presentation.get("timing", "after_dialogue"),
-                "visible_fact_ids": list(
-                    user_outcome.get("revealed_fact_ids", [])
-                ),
-                "max_characters": 100,
-                "style_profile": "concise",
-            }
-
+    """从 directive.narration_request 构建 narration spec。
+    
+    注意：user_outcome.presentation 已废弃，narration 只通过 directive.narration_request 控制。
+    """
     narration_request = directive.get("narration_request")
     if isinstance(narration_request, Mapping):
         return {
@@ -1917,7 +2027,7 @@ def _generate_hook_narration(
 
     transitions = bi.get("available_transitions", [])
     allowed_info = bi.get("allowed_information", [])
-    beat_purpose = bi.get("beat_purpose", "")
+    beat_plot = bi.get("beat_plot", "")
     beat_id = bi.get("current_beat_id", "")
 
     # 构造推进方向描述
@@ -2138,6 +2248,92 @@ def _capture_explicit_preferences(message: str, user_id: str) -> None:
         pass
 
 
+def _tick_free_chat(state, user_message=None, source="cron", lf_ctx=None):
+    """自由聊天模式：故事线已完成，不走 beat 推进，直接让杨戬回应用户。"""
+    outputs = []
+    if user_message:
+        perception_text = state_manager.get_perception("yangjian", state, "")
+        try:
+            import relationship as rel_mod
+            rel_summary = rel_mod.get_summary_for_yangjian()
+            if rel_summary:
+                perception_text = (
+                    perception_text + "\n\n" + rel_summary
+                ) if perception_text.strip() else rel_summary
+        except Exception:
+            pass
+        # 构建简化输入，不传 beat context
+        from contracts import YangJianTurnInput, AgentTask, FactRef, AgentRef, AgentKind, Phase, new_message
+        task = AgentTask(
+            task_id="free_chat",
+            target_agent_id="yangjian",
+            objective="故事已完结，与用户自由聊天。保持杨戬人设。",
+            source_reference="free_chat",
+        )
+        public_history = tuple(contracts.published_history(state))
+        turn_input = YangJianTurnInput(
+            task=task,
+            scene=state.get("scene", {}),
+            public_room_history=public_history,
+            perception=tuple([FactRef(fact_id="free", text=perception_text, visibility="private")])
+            if perception_text.strip() else (),
+        )
+        turn_id = f"turn_{state.get('tick', 0) + 1}"
+        actor_request = new_message(
+            turn_id=turn_id,
+            story_id="story_1",
+            beat_id="free_chat",
+            phase=Phase.ACT,
+            sender=AgentRef(agent_id="room", kind=AgentKind.ROOM),
+            recipient=AgentRef(agent_id="yangjian", kind=AgentKind.ACTOR),
+            message_type="yangjian.turn.input",
+            payload=turn_input,
+        )
+        try:
+            result = contracts.to_dict(yangjian.handle_message(actor_request).payload)
+            proposal = result.get("proposal")
+            if proposal:
+                action = proposal.get("action")
+                if action and isinstance(action, dict):
+                    desc = action.get("description", "").strip()
+                    if desc:
+                        outputs.append({"role": "杨戬的动作", "text": desc})
+                dialogue = proposal.get("dialogue")
+                if dialogue and isinstance(dialogue, dict):
+                    text = dialogue.get("text", "").strip()
+                    if text:
+                        outputs.append({"role": "杨戬", "text": text})
+            elif result.get("abstention"):
+                # Abstain - skip silently or log
+                pass
+        except Exception as exc:
+            log_error(lf_ctx or LangfuseCtx(), "room.free_chat_exception", exc)
+            outputs.append({"role": "系统", "text": "【杨戬暂时没有回应】"})
+
+    state["tick"] = state.get("tick", 0) + 1
+    if user_message:
+        state.setdefault("event_log", []).append(
+            f"[tick{state['tick']}] 用户: {user_message[:120]}"
+        )
+    for o in outputs:
+        if o["text"]:
+            state.setdefault("event_log", []).append(
+                f"[tick{state['tick']}] {o['role']}: {o['text'][:200]}"
+            )
+    state_manager.save(state)
+    log_event(
+        lf_ctx or LangfuseCtx(),
+        "room.free_chat",
+        output_data={"tick": state["tick"], "output_count": len(outputs)},
+    )
+    return {
+        "ok": True,
+        "output": outputs,
+        "state": state,
+        "decision": {"mode": "free_chat"},
+    }
+
+
 def _tick_traditional_fallback(state, user_message=None, source="cron"):
     """回退到传统单次 tick。"""
     decision = director.decide(state, user_message)
@@ -2161,6 +2357,9 @@ def _tick_traditional_fallback(state, user_message=None, source="cron"):
             outputs.append({"role": role, "text": f"【{role} 没有对应的 Agent】"})
 
     changes = decision.get("world_changes", {})
+    # scene / world_day 由 story plan beat 定义，Director 不再裁定
+    changes = {k: v for k, v in changes.items()
+               if k not in ("weather", "current_weather", "mood", "world_day")}
     if changes:
         state = state_manager.apply_changes(state, changes)
     for sk, sv in state.get("stories", {}).items():
@@ -2245,7 +2444,7 @@ def print_tick(user_message=None, source="cron"):
         ss_state = ss.load_state()
         if ss_state.get("status") == "active":
             bi = ss.get_current_beat_info(ss_state)
-            print(f"Beat: {bi.get('current_beat_id', '?')} — {bi.get('beat_purpose', '?')[:60]}")
+            print(f"Beat: {bi.get('current_beat_id', '?')} — {bi.get('beat_plot', '?')[:60]}")
     if result.get("ok"):
         print(f"场景: {result['decision'].get('scene', '?')}")
         print(f"排场: {' → '.join(result['decision'].get('order', []))}")

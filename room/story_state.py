@@ -27,6 +27,22 @@ DEFAULT_PLAN_PATH = os.path.join(PROFILE_DIR, "contexts/story_plan_story_1.json"
 # 引入 story_plan 解析
 _plan: StoryPlan | None = None
 
+# ── 运行配置（room_config.json） ──────────────────────────
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "room_config.json")
+
+
+def _load_room_config() -> dict[str, Any]:
+    try:
+        with open(_CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+_ROOM_CONFIG = _load_room_config()
+BEAT_MAX_TURNS_DEFAULT = _ROOM_CONFIG.get("beat_max_turns_default", 6)
+RECOVERY_MAX_TURNS_DEFAULT = _ROOM_CONFIG.get("recovery_max_turns_default", 4)
+
 
 def load_plan(path: str | None = None) -> StoryPlan | None:
     """加载故事计划。"""
@@ -51,35 +67,29 @@ def get_plan() -> StoryPlan | None:
 def default_state() -> dict[str, Any]:
     return {
         "status": "inactive",
+        "story_id": "",
         "current_arc": "main",
         "current_beat_id": "",
-        "current_beat_index": -1,
         "main_progress": 0.0,
         "flags": {},
         "selected_branch_consequences": [],
         "completed_beats": [],
         "completed_endings": [],
-        "unlocked_side_arcs": [],
-        "active_side_arcs": [],
         "beat_tick_counter": 0,
-        # beat goal 检测
-        "beat_goal": "",
-        "beat_max_turns": 6,
-        "beat_goal_met": False,
         # recovery 弧
         "in_recovery": False,
         "recovery_arc_id": None,
         "recovery_rejoin_target": None,
         "recovery_sub_goal": "",
-        "recovery_max_turns": 4,
+        "recovery_max_turns": RECOVERY_MAX_TURNS_DEFAULT,
         "recovery_sub_goal_met": False,
+        "recovery_tick_counter": 0,
         # 杨戬对用户的关系状态
         "relationship": {
             "trust": 1,
             "respect": 0,
             "closeness": 1,
             "wariness": 1,
-            "history": [],
         },
     }
 
@@ -88,8 +98,22 @@ def load_state() -> dict[str, Any]:
     path = runtime_context.scoped_path(STORY_STATE_PATH)
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    return default_state()
+            state = json.load(f)
+    else:
+        return default_state()
+    
+    # 验证和修复 active 状态
+    if state.get("status") == "active":
+        # active 状态必须有 story_id
+        if not state.get("story_id"):
+            plan = get_plan()
+            if plan:
+                state["story_id"] = plan.story_id
+        # active 状态的 completed_endings 应该清空（这是当前故事，不是已完成的）
+        if state.get("completed_endings"):
+            state["completed_endings"] = []
+    
+    return state
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -110,8 +134,8 @@ def activate_plan() -> dict[str, Any]:
         return default_state()
     state = default_state()
     state["status"] = "active"
-    state["current_beat_id"] = plan.main_arc.start_beat_id
-    state["current_beat_index"] = 0
+    state["story_id"] = plan.story_id
+    state["current_beat_id"] = plan.main_arc.beats[0].beat_id
     save_state(state)
     return state
 
@@ -132,38 +156,49 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
 
     current_id = state.get("current_beat_id", "")
 
-    # 先检查是否在回归弧中
+    # recovery 是 beat 内支线，不改变 current_beat_id
+    # 在当前 beat 信息上叠加 recovery 上下文
     if state.get("in_recovery"):
-        recovery_beats = state.get("_recovery_beats", [])
-        for b in recovery_beats:
-            if b["beat_id"] == current_id:
-                transitions = b.get("transitions", [])
-                return {
-                    "story_id": plan.story_id,
-                    "current_beat_id": b["beat_id"],
-                    "beat_purpose": b["purpose"],
-                    "beat_goal": state.get("beat_goal", ""),
-                    "beat_max_turns": state.get("beat_max_turns", 6),
-                    "beat_tick_counter": state.get("beat_tick_counter", 0),
-                    "participants": b.get("participants", ["user", "yangjian"]),
-                    "allowed_information": b.get("allowed_information", []),
-                    "forbidden_reveals": b.get("forbidden_reveals", []),
-                    "available_transitions": [
-                        {"transition_id": t.get("transition_id", "rejoin"),
-                         "target_id": t.get("target_id", state.get("recovery_rejoin_target", "")),
-                         "preserved_consequences": t.get("preserved_consequences", [])}
-                        for t in transitions
-                    ],
-                    "available_side_arcs": [],
-                    "npc_requirement_ids": [],
-                    "main_progress": state.get("main_progress", 0.0),
-                    "flags": dict(state.get("flags", {})),
-                    "consequences": list(state.get("selected_branch_consequences", [])),
-                    "in_recovery": True,
-                    "recovery_sub_goal": state.get("recovery_sub_goal", ""),
-                    "recovery_max_turns": state.get("recovery_max_turns", 4),
-                    "recovery_tick_counter": state.get("beat_tick_counter", 0),
+        beat = _find_beat(plan, current_id)
+        if beat:
+            transitions = [
+                {
+                    "transition_id": t.transition_id,
+                    "target_id": t.target_id,
+                    "goal": t.goal,
+                    "preserved_consequences": list(t.preserved_consequences),
+                    "relationship_requirements": getattr(t, "relationship_requirements", None),
                 }
+                for t in beat.transitions
+            ]
+            return {
+                "story_id": plan.story_id,
+                "current_beat_id": beat.beat_id,
+                "beat_plot": beat.plot,
+                "beat_goal": transitions[0].get("goal") if transitions else "",
+                "beat_tick_counter": state.get("beat_tick_counter", 0),
+                "participants": list(beat.participants),
+                "allowed_information": list(beat.allowed_information),
+                "forbidden_information": list(beat.forbidden_information),
+                "diversion_allowed": getattr(beat, "diversion_allowed", False),
+                "world_day": getattr(beat, "world_day", ""),
+                "time_of_day": getattr(beat, "time_of_day", ""),
+                "weather": getattr(beat, "weather", ""),
+                "location": getattr(beat, "location", ""),
+                "mood": getattr(beat, "mood", ""),
+                "available_transitions": transitions,
+                "active_side_arc": _find_arc(plan, beat.beat_id) if _find_arc(plan, beat.beat_id) != "main" else None,
+                "npc_requirement_ids": list(beat.npc_requirement_ids),
+                "main_progress": state.get("main_progress", 0.0),
+                "flags": dict(state.get("flags", {})),
+                "consequences": list(state.get("selected_branch_consequences", [])),
+                "relationship_checkpoint": getattr(beat, "relationship_checkpoint", None),
+                "in_recovery": True,
+                "recovery_arc_id": state.get("recovery_arc_id"),
+                "recovery_sub_goal": state.get("recovery_sub_goal", ""),
+                "recovery_max_turns": state.get("recovery_max_turns", RECOVERY_MAX_TURNS_DEFAULT),
+                "recovery_tick_counter": state.get("recovery_tick_counter", 0),
+            }
     beat = _find_beat(plan, current_id)
     if not beat:
         return {"error": f"beat_not_found:{current_id}"}
@@ -173,34 +208,30 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
         {
             "transition_id": t.transition_id,
             "target_id": t.target_id,
+            "goal": t.goal,
             "preserved_consequences": list(t.preserved_consequences),
             "relationship_requirements": getattr(t, "relationship_requirements", None),
         }
         for t in beat.transitions
     ]
 
-    # 已解锁副线
-    unlocked = state.get("unlocked_side_arcs", [])
-    available_side_arcs = []
-    for arc in plan.side_arcs:
-        if arc.arc_id in unlocked and arc.arc_id not in state.get("active_side_arcs", []):
-            available_side_arcs.append({
-                "arc_id": arc.arc_id,
-                "purpose": arc.purpose,
-            })
-
     return {
         "story_id": plan.story_id,
         "current_beat_id": beat.beat_id,
-        "beat_purpose": beat.purpose,
-        "beat_goal": getattr(beat, "goal", "") or state.get("beat_goal", "") or "",
-        "beat_max_turns": getattr(beat, "max_turns", 0) or state.get("beat_max_turns", 6),
+        "active_side_arc": _find_arc(plan, beat.beat_id) if _find_arc(plan, beat.beat_id) != "main" else None,
+        "beat_plot": beat.plot,
+        "beat_goal": transitions[0].get("goal") if transitions else "",
         "beat_tick_counter": state.get("beat_tick_counter", 0),
         "participants": list(beat.participants),
         "allowed_information": list(beat.allowed_information),
-        "forbidden_reveals": list(beat.forbidden_reveals),
+        "forbidden_information": list(beat.forbidden_information),
+        "diversion_allowed": getattr(beat, "diversion_allowed", False),
+        "world_day": getattr(beat, "world_day", ""),
+        "time_of_day": getattr(beat, "time_of_day", ""),
+        "weather": getattr(beat, "weather", ""),
+        "location": getattr(beat, "location", ""),
+        "mood": getattr(beat, "mood", ""),
         "available_transitions": transitions,
-        "available_side_arcs": available_side_arcs,
         "npc_requirement_ids": list(beat.npc_requirement_ids),
         "main_progress": state.get("main_progress", 0.0),
         "flags": dict(state.get("flags", {})),
@@ -288,7 +319,7 @@ def get_npc_profile(requirement_id: str) -> NPCProfileSpec | None:
                 behavior_boundaries=requirement.constraints,
                 story_bindings=(
                     requirement.story_id,
-                    requirement.side_arc_id,
+                    requirement.arc_id,
                 ),
                 reusable=requirement.reusable,
             )
@@ -311,15 +342,27 @@ def advance_beat(state: dict[str, Any], target_beat_id: str, consequences: list[
         if current not in completed:
             completed.append(current)
 
-    # 检查是否是结局
+    # 校验 target_beat_id 是否存在于 story plan 中（主线/副线/结局）
+    target_beat = _find_beat(plan, target_beat_id)
     ends = [e.ending_id for e in plan.main_arc.endings]
-    for arc in plan.side_arcs:
-        ends.extend(e.ending_id for e in arc.endings)
-    if target_beat_id in ends:
+    is_ending = target_beat_id in ends
+
+    if not target_beat and not is_ending:
+        # target_beat_id 不存在于 story plan 中，判定故事线已完成
+        state["status"] = "completed"
+        state["current_beat_id"] = target_beat_id
+        state["beat_tick_counter"] = 0
+        save_state(state)
+        return state
+
+    # 检查是否是结局
+    if is_ending:
         completed_ends = state.setdefault("completed_endings", [])
         if target_beat_id not in completed_ends:
             completed_ends.append(target_beat_id)
-        if _find_arc(plan, target_beat_id) == "main":
+        # _find_arc only searches beats, not endings — check endings directly
+        main_ending_ids = [e.ending_id for e in plan.main_arc.endings]
+        if target_beat_id in main_ending_ids:
             state["status"] = "completed"
 
     state["current_beat_id"] = target_beat_id
@@ -340,23 +383,6 @@ def advance_beat(state: dict[str, Any], target_beat_id: str, consequences: list[
             state["recovery_sub_goal"] = ""
             state["recovery_sub_goal_met"] = False
 
-    # 设置新 beat 的 goal 和 max_turns
-    beat = _find_beat(plan, target_beat_id)
-    if beat:
-        # 从 story plan 读取 goal 和 max_turns（如果有）
-        beat_goal = getattr(beat, "goal", "") or getattr(beat, "beat_goal", "")
-        beat_max_turns = getattr(beat, "max_turns", 0) or 0
-        state["beat_goal"] = beat_goal
-        state["beat_max_turns"] = beat_max_turns if beat_max_turns > 0 else 6
-    else:
-        # recovery beat: goal 从 beat purpose 推导
-        recovery_beats = state.get("_recovery_beats", [])
-        for rb in recovery_beats:
-            if rb.get("beat_id") == target_beat_id:
-                state["beat_goal"] = rb.get("purpose", "")
-                state["beat_max_turns"] = rb.get("max_turns", 4)
-                break
-
     # 保存分支后果
     if consequences:
         existing = state.setdefault("selected_branch_consequences", [])
@@ -374,37 +400,13 @@ def advance_beat(state: dict[str, Any], target_beat_id: str, consequences: list[
     return state
 
 
-def check_and_unlock_side_arcs(state: dict[str, Any]) -> list[str]:
-    """检查主线进度是否解锁了新的副线。"""
+def get_active_side_arc(state: dict[str, Any]) -> str | None:
+    """返回当前 beat 所在的副线 arc_id，如果在主线则返回 None。"""
     plan = get_plan()
     if not plan:
-        return []
-    newly_unlocked = []
-    for arc in plan.side_arcs:
-        if arc.arc_id in state.get("unlocked_side_arcs", []):
-            continue
-        rule = arc.unlock
-        passed = True
-        if rule.minimum_main_progress > 0:
-            if state.get("main_progress", 0.0) < rule.minimum_main_progress:
-                passed = False
-        for m in rule.required_milestones:
-            if m not in plan.main_arc.milestones:
-                continue
-            # 检查里程碑是否完成——即主线进度超过该里程碑对应的 beat
-            milestone_index = plan.main_arc.milestones.index(m)
-            beats_per_ms = max(1, len(plan.main_arc.beats) // max(1, len(plan.main_arc.milestones)))
-            if state.get("main_progress", 0.0) < (milestone_index + 1) * beats_per_ms / len(plan.main_arc.beats):
-                passed = False
-        for f, expected in rule.required_flags.items() if hasattr(rule.required_flags, 'items') else []:
-            if state.get("flags", {}).get(f) != expected:
-                passed = False
-        if passed:
-            state.setdefault("unlocked_side_arcs", []).append(arc.arc_id)
-            newly_unlocked.append(arc.arc_id)
-    if newly_unlocked:
-        save_state(state)
-    return newly_unlocked
+        return None
+    arc = _find_arc(plan, state.get("current_beat_id", ""))
+    return arc if arc and arc != "main" else None
 
 
 def set_flag(state: dict[str, Any], key: str, value: Any = True) -> None:
@@ -417,17 +419,13 @@ def increment_beat_tick(state: dict[str, Any]) -> None:
     save_state(state)
 
 
-# ── beat goal 检测 ─────────────────────────────────────────
-
-
-def check_beat_goal(state: dict[str, Any], goal_met: bool) -> bool:
-    """Director resolve 调用：标记当前 beat 的 goal 是否达成。
-
-    返回 True 表示 goal 达成，Room 应推进到下一个 beat。
-    """
-    state["beat_goal_met"] = goal_met
+def increment_recovery_tick(state: dict[str, Any]) -> None:
+    """递增 recovery 轮次计数器（独立于 beat_tick_counter）。"""
+    state["recovery_tick_counter"] = state.get("recovery_tick_counter", 0) + 1
     save_state(state)
-    return goal_met
+
+
+# ── beat goal 检测 ─────────────────────────────────────────
 
 
 def check_beat_max_turns(state: dict[str, Any]) -> bool:
@@ -436,17 +434,10 @@ def check_beat_max_turns(state: dict[str, Any]) -> bool:
     返回 True 表示已达到 max_turns，需要 director 判定 goal 是否达成，
     未达成则进入 recovery。
     """
-    max_turns = state.get("beat_max_turns", 6)
+    max_turns = BEAT_MAX_TURNS_DEFAULT
     if max_turns <= 0:
         return False
     return state.get("beat_tick_counter", 0) >= max_turns
-
-
-def ensure_beat_goal(state: dict[str, Any]) -> str | None:
-    """如果 beat_goal 为空，返回需要 director 动态生成的信号。"""
-    if not state.get("beat_goal"):
-        return "needs_generation"
-    return None
 
 
 # ── recovery 弧管理 ─────────────────────────────────────────
@@ -458,12 +449,14 @@ def enter_recovery_arc(
     recovery_beats: list[dict],
     rejoin_target: str,
     sub_goal: str = "",
-    max_turns: int = 4,
+    max_turns: int = RECOVERY_MAX_TURNS_DEFAULT,
 ) -> None:
-    """进入回归弧模式。
+    """进入 recovery 弧（beat 内支线）。
 
+    不改变 current_beat_id，不重置 beat_tick_counter。
+    recovery 有独立的 recovery_tick_counter。
     sub_goal: 本次 recovery 的子目标（director resolve 每回合检测是否达成）
-    max_turns: 最大回合数，到了仍没达成子目标则强行退出
+    max_turns: recovery 最大回合数，到了仍没达成子目标则强行退出
     """
     state["in_recovery"] = True
     state["recovery_arc_id"] = recovery_arc_id
@@ -472,8 +465,8 @@ def enter_recovery_arc(
     state["recovery_sub_goal"] = sub_goal
     state["recovery_max_turns"] = max_turns
     state["recovery_sub_goal_met"] = False
-    state["current_beat_id"] = recovery_beats[0]["beat_id"] if recovery_beats else rejoin_target
-    state["beat_tick_counter"] = 0
+    state["recovery_tick_counter"] = 0
+    # 不改 current_beat_id，不重置 beat_tick_counter
     save_state(state)
 
 
@@ -490,22 +483,25 @@ def check_recovery_sub_goal(state: dict[str, Any], sub_goal_met: bool) -> bool:
 def check_recovery_max_turns(state: dict[str, Any]) -> bool:
     """检查 recovery 是否已达到最大回合数。
 
-    返回 True 表示需要强行退出 recovery（narrator 写过渡剧情衔接下一 beat）。
+    使用 recovery_tick_counter，不影响 beat_tick_counter。
+    返回 True 表示需要强行退出 recovery。
     """
-    max_turns = state.get("recovery_max_turns", 4)
+    max_turns = state.get("recovery_max_turns", RECOVERY_MAX_TURNS_DEFAULT)
     if max_turns <= 0:
         return False
-    return state.get("beat_tick_counter", 0) >= max_turns
+    return state.get("recovery_tick_counter", 0) >= max_turns
 
 
 def exit_recovery_arc(state: dict[str, Any]) -> str | None:
-    """退出回归弧，回到主线。返回 rejoin_target（供 Room 调 narrator 写过渡）。"""
+    """退出 recovery 弧，回到当前 beat。返回 rejoin_target（供 Room 写过渡旁白）。"""
     target = state.get("recovery_rejoin_target")
     state["in_recovery"] = False
     state["recovery_arc_id"] = None
     state["recovery_rejoin_target"] = None
     state["recovery_sub_goal"] = ""
     state["recovery_sub_goal_met"] = False
+    state["recovery_tick_counter"] = 0
     state["_recovery_beats"] = []
+    # 不重置 beat_tick_counter--recovery 的轮次不算 beat 的轮次
     save_state(state)
     return target

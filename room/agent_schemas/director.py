@@ -61,12 +61,6 @@ class PresentationOutput(BaseModel):
     timing: str
 
 
-class UserFeedbackOutput(BaseModel):
-    model_config = _CFG
-
-    outcome_summary: str
-    revealed_fact_ids: list[str] = Field(default_factory=list)
-    presentation: PresentationOutput
 
 
 class InlineEffectsOutput(BaseModel):
@@ -74,6 +68,13 @@ class InlineEffectsOutput(BaseModel):
 
     state_operations: list[StateOperationOutput] = Field(default_factory=list)
     user_feedback: UserFeedbackOutput | None = None
+
+
+
+class UserFeedbackOutput(BaseModel):
+    model_config = _CFG
+    outcome_summary: str
+    revealed_fact_ids: list[str] = Field(default_factory=list)
 
 
 class DirectorTaskOutput(BaseModel):
@@ -91,22 +92,6 @@ class DirectorTaskOutput(BaseModel):
         result = coerce_target_in_pool(value, allow_none=False)
         assert result is not None
         return result
-
-
-class SceneUpdateOutput(BaseModel):
-    """Optional scene change directive from Director.
-
-    All fields are optional; null/missing means "no change".
-    Only non-null values are merged into world_state.scene.
-    """
-
-    model_config = _CFG
-
-    location: str | None = None
-    weather: str | None = None
-    time_of_day: str | None = None
-    mood: str | None = None
-
 
 class DirectorNarrationOutput(BaseModel):
     model_config = _CFG
@@ -152,7 +137,7 @@ class DirectorDirectiveOutput(BaseModel):
     Trimmed to only fields Room actually reads for logic decisions.
     Removed fields are auto-filled by Room:
     - mode/chapter/beat: Room overrides from beat_info
-    - selected_side_arc/fallback_world_event: never used
+    - fallback_world_event: never used
     - source_reference/success_condition: Room sets defaults
     - npc_commands: Room auto-generates from beat NPC profiles
     - inline_effects: Room fills default; only fast path uses it
@@ -171,7 +156,6 @@ class DirectorDirectiveOutput(BaseModel):
     resolve_gate: ResolveGateOutput
     tasks: list[DirectorTaskOutput] = Field(default_factory=list)
     narration: DirectorNarrationOutput
-    scene_update: SceneUpdateOutput | None = None
 
 
 class UserOutcomeOutput(BaseModel):
@@ -186,6 +170,71 @@ class UserOutcomeOutput(BaseModel):
     ]
     outcome_summary: str
     revealed_fact_ids: list[str] = Field(default_factory=list)
+
+
+class ResolutionDecisionOutput(BaseModel):
+    model_config = _CFG
+
+    proposal_id: str = Field(min_length=1)
+    result: Literal[
+        "accept",
+        "modify",
+        "reject",
+        "accept_abstention",
+    ]
+    outcome_summary: str = Field(min_length=1)
+    # Optional confirmed text for modify/accept. Room falls back to the
+    # original actor proposal when these are omitted.
+    final_dialogue: dict[str, Any] | None = None
+    final_action: dict[str, Any] | None = None
+
+
+class ContinuationOutput(BaseModel):
+    model_config = _CFG
+
+    kind: Literal[
+        "continue_current",
+        "redispatch",
+        "world_event",
+        "advance",
+    ]
+    reason: str = Field(min_length=1)
+    target_id: str | None = None
+    world_event: dict[str, Any] | None = None
+
+
+class DirectorResolutionOutput(BaseModel):
+    """LLM output for RESOLVE phase.
+
+    Removed redundant fields (mode/chapter/beat) that Room always overrides.
+    """
+
+    model_config = _CFG
+
+    decisions: list[ResolutionDecisionOutput] = Field(default_factory=list)
+    user_outcome: UserOutcomeOutput
+    state_changes: list[StateOperationOutput] = Field(default_factory=list)
+    next_beat: str | None = None
+    continuation: ContinuationOutput
+    sub_goal_met: bool = Field(
+        default=False,
+        description="仅在 recovery 弧中填写：recovery 子目标是否已达成。达成则退出 recovery 回到主线。非 recovery 弧填 false。",
+    )
+
+
+
+    model_config = _CFG
+
+    applies: bool
+    result: Literal[
+        "accepted",
+        "partial",
+        "failed",
+        "not_applicable",
+    ]
+    outcome_summary: str
+    revealed_fact_ids: list[str] = Field(default_factory=list)
+
     presentation: PresentationOutput
 
 
@@ -233,12 +282,10 @@ class DirectorResolutionOutput(BaseModel):
     state_changes: list[StateOperationOutput] = Field(default_factory=list)
     next_beat: str | None = None
     continuation: ContinuationOutput
-    scene_update: SceneUpdateOutput | None = None
-    goal_met: bool = Field(
-        default=False,
-        description="当前 beat 的 goal 是否已达成（用户做了期望的行为/获得了关键信息等）。达成则 Room 推进到下一个 beat。",
-    )
     sub_goal_met: bool = Field(
         default=False,
         description="仅在 recovery 弧中填写：recovery 子目标是否已达成。达成则退出 recovery 回到主线。非 recovery 弧填 false。",
     )
+
+
+

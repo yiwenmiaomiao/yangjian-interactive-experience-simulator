@@ -78,7 +78,7 @@ def npc_record_from_dict(data: Mapping[str, Any]) -> NPCRecord:
         memory=memory,
         story_ids=tuple(data.get("story_ids", ())),
         active_story_id=data.get("active_story_id"),
-        active_side_arc_id=data.get("active_side_arc_id"),
+        active_arc_id=data.get("active_arc_id"),
         active_scene_id=data.get("active_scene_id"),
         last_transition_reason=str(data.get("last_transition_reason", "")),
     )

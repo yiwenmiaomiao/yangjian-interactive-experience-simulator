@@ -5,6 +5,8 @@ auth.lock
 gateway.lock
 gateway_state.json
 config.yaml
+.env.backup
+.env.bak
 
 # ── 数据库 ────────────────────────────────────
 state.db

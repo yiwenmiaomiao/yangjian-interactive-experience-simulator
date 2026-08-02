@@ -143,7 +143,7 @@ class RelationshipCheckpoint:
 class BranchTransition:
     transition_id: str
     target_id: str
-    conditions: tuple[Condition, ...] = ()
+    goal: str = ""
     preserved_consequences: tuple[str, ...] = ()
     # Optional relationship requirements for this transition.
     # e.g. {"trust": {"min": 2}, "closeness": {"min": 1}}
@@ -158,7 +158,6 @@ class BranchTransition:
 class Ending:
     ending_id: str
     summary: str
-    conditions: tuple[Condition, ...] = ()
 
     def __post_init__(self) -> None:
         _require_text(self.ending_id, "ending_id")
@@ -169,24 +168,22 @@ class Ending:
 class NPCRequirement:
     requirement_id: str
     story_id: str
-    side_arc_id: str
+    arc_id: str
     narrative_function: NarrativeFunction
     purpose: str
-    background_requirement: str
+    npc_background: str
     relation_to_yangjian: str
     relation_to_user: str
     current_goal: str
     must_know: tuple[str, ...] = ()
     must_not_know: tuple[str, ...] = ()
-    entry_condition: str = ""
-    exit_condition: str = ""
     reusable: bool = True
     constraints: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_text(self.requirement_id, "requirement_id")
         _require_text(self.story_id, "story_id")
-        _require_text(self.side_arc_id, "side_arc_id")
+        _require_text(self.arc_id, "arc_id")
         _require_text(self.purpose, "NPC purpose")
         overlap = set(self.must_know) & set(self.must_not_know)
         if overlap:
@@ -245,50 +242,40 @@ class NPCProfileSpec:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StoryBeat:
     beat_id: str
-    purpose: str
-    goal: str = ""
-    max_turns: int = 6
+    plot: str
     participants: tuple[str, ...]
     transitions: tuple[BranchTransition, ...] = ()
-    prerequisites: tuple[str, ...] = ()
     allowed_information: tuple[str, ...] = ()
-    forbidden_reveals: tuple[str, ...] = ()
+    forbidden_information: tuple[str, ...] = ()
     npc_requirement_ids: tuple[str, ...] = ()
-    reconverges_at: str | None = None
+    diversion_allowed: bool = False
+    # 场景状态：Room 每轮从 story plan beat 读取并更新 world_state
+    world_day: str = ""
+    time_of_day: str = ""
+    weather: str = ""
+    location: str = ""
+    mood: str = ""
     # Optional: marks this beat as a relationship evaluation point.
     # When present, yangjian outputs relationship_feedback after his turn.
     relationship_checkpoint: RelationshipCheckpoint | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.beat_id, "beat_id")
-        _require_text(self.purpose, "beat purpose")
+        _require_text(self.plot, "beat plot")
         if not self.participants:
             raise ValueError("participants must not be empty")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class UnlockRule:
-    minimum_main_progress: float = 0.0
-    required_milestones: tuple[str, ...] = ()
-    required_flags: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        _require_ratio(self.minimum_main_progress, "minimum_main_progress")
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
 class MainArc:
-    arc_id: str
     goal: str
-    start_beat_id: str
     beats: tuple[StoryBeat, ...]
     endings: tuple[Ending, ...]
-    milestones: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        _require_text(self.arc_id, "main arc_id")
         _require_text(self.goal, "main goal")
-        _require_text(self.start_beat_id, "main start_beat_id")
+        if not self.beats:
+            raise ValueError("main arc must have at least one beat")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -296,16 +283,12 @@ class SideArc:
     arc_id: str
     purpose: str
     impact_on_main_arc: tuple[str, ...]
-    unlock: UnlockRule
-    start_beat_id: str
     beats: tuple[StoryBeat, ...]
-    endings: tuple[Ending, ...]
     npc_requirements: tuple[NPCRequirement, ...] = ()
 
     def __post_init__(self) -> None:
         _require_text(self.arc_id, "side arc_id")
         _require_text(self.purpose, "side purpose")
-        _require_text(self.start_beat_id, "side start_beat_id")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -322,43 +305,22 @@ class Secret:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Foreshadowing:
-    foreshadowing_id: str
-    setup_beat_id: str
-    payoff_beat_id: str
-    private_meaning: str
-
-    def __post_init__(self) -> None:
-        _require_text(self.foreshadowing_id, "foreshadowing_id")
-        _require_text(self.setup_beat_id, "setup_beat_id")
-        _require_text(self.payoff_beat_id, "payoff_beat_id")
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
 class StoryPlan:
     story_id: str
-    schema_version: int
     created_at: str
-    character_snapshot_version: str
-    preference_snapshot_version: int
-    story_standard_version: int
     premise: str
     theme: str
     main_arc: MainArc
     side_arcs: tuple[SideArc, ...] = ()
     secrets: tuple[Secret, ...] = ()
-    foreshadowing: tuple[Foreshadowing, ...] = ()
     npc_profiles: tuple[NPCProfileSpec, ...] = ()
     global_constraints: tuple[str, ...] = ()
-    forbidden_reveals: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_text(self.story_id, "story_id")
         _require_text(self.created_at, "created_at")
         _require_text(self.premise, "premise")
         _require_text(self.theme, "theme")
-        if self.schema_version < 1:
-            raise ValueError("schema_version must be at least 1")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -367,7 +329,6 @@ class StoryStandard:
     required_main_participants: tuple[str, ...] = ("user", "yangjian")
     required_side_participants: tuple[str, ...] = ("user", "yangjian")
     maximum_main_endings: int = 2
-    maximum_side_endings: int = 4
     allow_graph_cycles: bool = False
     npc_only_in_side_arcs: bool = True
 
@@ -376,5 +337,3 @@ class StoryStandard:
             raise ValueError("standard version must be at least 1")
         if not 1 <= self.maximum_main_endings <= 2:
             raise ValueError("maximum_main_endings must be 1 or 2")
-        if self.maximum_side_endings < 1:
-            raise ValueError("maximum_side_endings must be at least 1")

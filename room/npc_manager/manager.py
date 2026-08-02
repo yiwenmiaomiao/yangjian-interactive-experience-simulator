@@ -142,7 +142,7 @@ class NPCManager:
         npc_id: str,
         *,
         story_id: str,
-        side_arc_id: str,
+        arc_id: str,
         scene_id: str,
         reason: str,
     ) -> NPCRecord:
@@ -158,7 +158,7 @@ class NPCManager:
             trigger=trigger,
             reason=reason,
             story_id=story_id,
-            side_arc_id=side_arc_id,
+            arc_id=arc_id,
             scene_id=scene_id,
         )
         self._repository.save(activated)
@@ -318,8 +318,8 @@ class NPCManager:
                 )
             ),
             reusable=profile.reusable and requirement.reusable,
-            entry_condition=requirement.entry_condition,
-            exit_condition=requirement.exit_condition,
+            entry_condition="",
+            exit_condition="",
             source_requirement_ids=tuple(
                 dict.fromkeys(
                     (*profile.source_requirement_ids, requirement.requirement_id)

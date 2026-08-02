@@ -34,17 +34,15 @@ def requirement(*, forbidden: tuple[str, ...] = ("main_ending",)) -> NPCRequirem
     return NPCRequirement(
         requirement_id="req_1",
         story_id="story_1",
-        side_arc_id="side_1",
+        arc_id="side_1",
         narrative_function=NarrativeFunction.CATALYST,
         purpose="Push a side arc.",
-        background_requirement="Village messenger",
+        npc_background="Village messenger",
         relation_to_yangjian="Acquaintance",
         relation_to_user="Stranger",
         current_goal="Deliver a request",
         must_know=("public_request",),
         must_not_know=forbidden,
-        entry_condition="side_1_started",
-        exit_condition="request_resolved",
     )
 
 
@@ -161,7 +159,7 @@ class NPCManagerTests(unittest.TestCase):
         active = manager.activate(
             record.profile.npc_id,
             story_id="story_1",
-            side_arc_id="side_1",
+            arc_id="side_1",
             scene_id="scene_1",
             reason="Director approved entry",
         )
@@ -226,7 +224,7 @@ class NPCManagerTests(unittest.TestCase):
         active = manager.activate(
             reused.profile.npc_id,
             story_id="story_2",
-            side_arc_id="side_1",
+            arc_id="side_1",
             scene_id="scene_2",
             reason="Reused in a later story",
         )
@@ -281,7 +279,7 @@ class AsyncNPCManagerTests(unittest.IsolatedAsyncioTestCase):
         active = manager.activate(
             record.profile.npc_id,
             story_id="story_1",
-            side_arc_id="side_1",
+            arc_id="side_1",
             scene_id="scene_1",
             reason="Director approved entry",
         )

@@ -15,7 +15,6 @@ class DirectorContext:
     allowed_information: Mapping[str, frozenset[str]]
     allowed_source_references: frozenset[str]
     unlocked_next_beats: frozenset[str] = frozenset()
-    unlocked_side_arcs: frozenset[str] = frozenset()
     allowed_state_change_keys: frozenset[str] = frozenset()
     proposal_ids: frozenset[str] = frozenset()
     narration_allowed: bool = False
@@ -213,17 +212,6 @@ def validate_directive(
         )
 
     _check_resolve_gate(payload, context, issues)
-
-    side_arc = payload.get("selected_side_arc")
-    # 使用真值判断过滤空字符串
-    if side_arc and side_arc not in context.unlocked_side_arcs:
-        issues.append(
-            _issue(
-                "SIDE_ARC_LOCKED",
-                f"side arc is not unlocked: {side_arc}",
-                "selected_side_arc",
-            )
-        )
 
     _check_narration(payload.get("narration"), context, issues)
     return GuardReport(issues=tuple(issues))

@@ -12,7 +12,6 @@
 """
 from __future__ import annotations
 
-import datetime
 from typing import Any
 
 import runtime_context
@@ -107,7 +106,6 @@ def default_relationship() -> dict[str, Any]:
         "respect": _DEFAULTS["respect"],
         "closeness": _DEFAULTS["closeness"],
         "wariness": _DEFAULTS["wariness"],
-        "history": [],
     }
 
 
@@ -121,8 +119,6 @@ def load_relationship() -> dict[str, Any]:
     for dim in _DIMENSIONS:
         if dim not in rel:
             rel[dim] = _DEFAULTS[dim]
-    if "history" not in rel:
-        rel["history"] = []
     return rel
 
 
@@ -138,7 +134,7 @@ def apply_delta(
     beat_id: str,
     reason: str,
 ) -> dict[str, Any]:
-    """Apply relationship changes and record to history.
+    """Apply relationship changes.
 
     Args:
         changes: e.g. {"trust": +1, "wariness": -1}
@@ -158,13 +154,6 @@ def apply_delta(
         if new != old:
             rel[dim] = new
             clamped_changes[dim] = delta
-    if clamped_changes:
-        rel.setdefault("history", []).append({
-            "beat_id": beat_id,
-            "changes": clamped_changes,
-            "reason": reason,
-            "timestamp": datetime.datetime.now().isoformat(),
-        })
     save_relationship(rel)
     return rel
 

@@ -11,6 +11,7 @@ import os
 from dataclasses import asdict
 from typing import Any
 
+from .llm_bridge import call_llm
 from .models import CanonicalEvent, CharacterContext, PreferenceSnapshot
 
 PROJECT_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
@@ -55,22 +56,6 @@ def load_memory() -> str:
         with open(path, encoding="utf-8") as f:
             return f.read()
     return ""
-
-
-# ── 模型调用（复用 room 的 llm.py） ────────────────────────────
-
-
-def _call_llm(system: str, user: str, temperature: float = 0.3, max_tokens: int = 4000) -> str:
-    """调用 room 的 llm 模块。"""
-    import sys
-    sys.path.insert(0, _resolve("room"))
-    import llm as room_llm
-    return room_llm.call(
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
 
 
 # ── CharacterContext 生成 ─────────────────────────────────────
@@ -164,7 +149,13 @@ def generate_character_context() -> CharacterContext:
 3. 区分核心设定和可发挥空间
 4. 输出严格的结构化 JSON"""
 
-    raw = _call_llm(system=system, user=prompt, temperature=0.3, max_tokens=4000)
+    raw = call_llm(
+        system=system,
+        user=prompt,
+        agent_id="story_generator.character",
+        temperature=0.3,
+        max_tokens=4000,
+    )
 
     # 从模型输出中提取 JSON
     data = _extract_json(raw)

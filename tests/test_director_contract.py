@@ -16,7 +16,6 @@ class DirectorContractTests(unittest.TestCase):
                 {"profile_id": "profile_guard", "requirement_id": "req_guard"}
             ],
             "available_transitions": [],
-            "available_side_arcs": [],
         }
         canonical = director._enrich_canonical_directive({
             "mode": "DIRECT",
@@ -47,7 +46,6 @@ class DirectorContractTests(unittest.TestCase):
             }],
             "npc_commands": [],
             "desired_progress": "maintain",
-            "selected_side_arc": None,
             "narration": {
                 "required": False,
                 "purpose": "none",
@@ -71,8 +69,7 @@ class DirectorContractTests(unittest.TestCase):
             "active_npcs": [],
             "npc_profiles": [],
             "available_transitions": [],
-            "available_side_arcs": [],
-            "forbidden_reveals": [],
+            "forbidden_information": [],
         }
         payload = {
             "mode": "DIRECT",
@@ -89,7 +86,6 @@ class DirectorContractTests(unittest.TestCase):
             }],
             "npc_commands": [],
             "desired_progress": "maintain",
-            "selected_side_arc": None,
             "narration": {
                 "required": True,
                 "purpose": "确认异常现象出现在杨戬和用户面前",

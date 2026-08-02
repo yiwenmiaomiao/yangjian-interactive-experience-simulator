@@ -152,7 +152,6 @@ def _build_payload(
         "rules": {
             "main_focus": ["user", "yangjian"],
             "maximum_main_endings": standard.maximum_main_endings,
-            "maximum_side_endings": standard.maximum_side_endings,
             "npc_only_in_side_arcs": standard.npc_only_in_side_arcs,
             "no_prebuilt_dialogue": True,
             "preserve_branch_consequences_after_reconvergence": True,

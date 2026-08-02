@@ -375,6 +375,9 @@ def log_event(
         "room.publish",
         "room.recovery_auto_advance",
         "room.scene_location_from_narrator",
+        "room.final_state",
+        "room.trace_start",
+        "room.trace_end",
     }
     if name not in _ALLOWED:
         return

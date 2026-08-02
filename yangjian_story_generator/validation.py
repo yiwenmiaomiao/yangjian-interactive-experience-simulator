@@ -41,19 +41,11 @@ class StoryPlanValidator:
     def validate(self, plan: StoryPlan) -> ValidationReport:
         issues: list[ValidationIssue] = []
 
-        if plan.story_standard_version != self.standard.version:
-            issues.append(
-                self._warning(
-                    "STANDARD_VERSION_MISMATCH",
-                    "Plan and validator use different story standard versions.",
-                    plan.story_id,
-                )
-            )
-
         issues.extend(self._validate_arc_ids(plan))
         issues.extend(self._validate_main_arc(plan.main_arc))
         for side_arc in plan.side_arcs:
             issues.extend(self._validate_side_arc(side_arc, plan.story_id))
+        issues.extend(self._validate_combined_graph(plan))
         issues.extend(self._validate_npc_profiles(plan))
         issues.extend(self._validate_cross_references(plan))
         issues.extend(self._validate_information_boundaries(plan))
@@ -62,7 +54,7 @@ class StoryPlanValidator:
 
     def _validate_arc_ids(self, plan: StoryPlan) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
-        arc_ids = [plan.main_arc.arc_id, *(arc.arc_id for arc in plan.side_arcs)]
+        arc_ids = [*(arc.arc_id for arc in plan.side_arcs)]
         duplicates = self._duplicates(arc_ids)
         for arc_id in duplicates:
             issues.append(
@@ -126,7 +118,7 @@ class StoryPlanValidator:
 
     def _validate_main_arc(self, arc: MainArc) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
-        location = f"main_arc:{arc.arc_id}"
+        location = "main_arc"
 
         if not 1 <= len(arc.endings) <= self.standard.maximum_main_endings:
             issues.append(
@@ -167,14 +159,6 @@ class StoryPlanValidator:
                     )
                 )
 
-        issues.extend(
-            self._validate_graph(
-                arc_id=arc.arc_id,
-                start_beat_id=arc.start_beat_id,
-                beats=arc.beats,
-                ending_ids=tuple(ending.ending_id for ending in arc.endings),
-            )
-        )
         return issues
 
     def _validate_side_arc(
@@ -190,18 +174,6 @@ class StoryPlanValidator:
                 self._error(
                     "SIDE_ARC_NO_MAIN_IMPACT",
                     "A side arc must declare how it affects the main arc.",
-                    location,
-                )
-            )
-
-        if not 1 <= len(arc.endings) <= self.standard.maximum_side_endings:
-            issues.append(
-                self._error(
-                    "SIDE_ENDING_COUNT",
-                    (
-                        "Side arc ending count must be between 1 and "
-                        f"{self.standard.maximum_side_endings}."
-                    ),
                     location,
                 )
             )
@@ -230,12 +202,12 @@ class StoryPlanValidator:
                         f"{location}/npc:{requirement.requirement_id}",
                     )
                 )
-            if requirement.side_arc_id != arc.arc_id:
+            if requirement.arc_id != arc.arc_id:
                 issues.append(
                     self._error(
                         "NPC_REQUIREMENT_ARC_MISMATCH",
                         (
-                            f"NPC requirement belongs to {requirement.side_arc_id}, "
+                            f"NPC requirement belongs to {requirement.arc_id}, "
                             f"expected {arc.arc_id}."
                         ),
                         f"{location}/npc:{requirement.requirement_id}",
@@ -262,204 +234,109 @@ class StoryPlanValidator:
                     )
                 )
 
-        issues.extend(
-            self._validate_graph(
-                arc_id=arc.arc_id,
-                start_beat_id=arc.start_beat_id,
-                beats=arc.beats,
-                ending_ids=tuple(ending.ending_id for ending in arc.endings),
-            )
-        )
         return issues
 
-    def _validate_graph(
-        self,
-        *,
-        arc_id: str,
-        start_beat_id: str,
-        beats: tuple[StoryBeat, ...],
-        ending_ids: tuple[str, ...],
+    def _validate_combined_graph(
+        self, plan: StoryPlan
     ) -> list[ValidationIssue]:
+        """Validate the combined story graph across main + side arcs.
+
+        Allows cross-arc transitions (main->side entry, side->main return)
+        but disallows side-to-side cross-arc transitions.
+        """
         issues: list[ValidationIssue] = []
-        location = f"arc:{arc_id}"
-        beat_ids = [beat.beat_id for beat in beats]
-        node_ids = set(beat_ids) | set(ending_ids)
 
-        for duplicate in self._duplicates(beat_ids):
-            issues.append(
-                self._error(
-                    "DUPLICATE_BEAT_ID",
-                    f"Beat id is duplicated: {duplicate}",
-                    location,
-                )
-            )
-        for duplicate in self._duplicates(ending_ids):
-            issues.append(
-                self._error(
-                    "DUPLICATE_ENDING_ID",
-                    f"Ending id is duplicated: {duplicate}",
-                    location,
-                )
-            )
-        overlap = set(beat_ids) & set(ending_ids)
+        # Build global node sets and beat->arc mapping
+        beat_to_arc: dict[str, str] = {}
+        all_beat_ids: list[str] = []
+        all_ending_ids: list[str] = []
+        all_beats: list[StoryBeat] = []
+
+        for beat in plan.main_arc.beats:
+            beat_to_arc[beat.beat_id] = "main"
+            all_beat_ids.append(beat.beat_id)
+            all_beats.append(beat)
+        for ending in plan.main_arc.endings:
+            all_ending_ids.append(ending.ending_id)
+        for arc in plan.side_arcs:
+            for beat in arc.beats:
+                beat_to_arc[beat.beat_id] = arc.arc_id
+                all_beat_ids.append(beat.beat_id)
+                all_beats.append(beat)
+
+        node_ids = set(all_beat_ids) | set(all_ending_ids)
+
+        # Duplicate / collision checks (global)
+        for duplicate in self._duplicates(all_beat_ids):
+            issues.append(self._error("DUPLICATE_BEAT_ID", f"Beat id is duplicated: {duplicate}", "graph"))
+        for duplicate in self._duplicates(all_ending_ids):
+            issues.append(self._error("DUPLICATE_ENDING_ID", f"Ending id is duplicated: {duplicate}", "graph"))
+        overlap = set(all_beat_ids) & set(all_ending_ids)
         for node_id in sorted(overlap):
-            issues.append(
-                self._error(
-                    "NODE_ID_COLLISION",
-                    f"Beat and ending share the same id: {node_id}",
-                    location,
-                )
-            )
+            issues.append(self._error("NODE_ID_COLLISION", f"Beat and ending share the same id: {node_id}", "graph"))
 
-        if start_beat_id not in set(beat_ids):
-            issues.append(
-                self._error(
-                    "UNKNOWN_START_BEAT",
-                    f"Start beat does not exist: {start_beat_id}",
-                    location,
-                )
-            )
-
+        # Transition validation
         adjacency: dict[str, set[str]] = {node_id: set() for node_id in node_ids}
         transition_ids: list[str] = []
-        for beat in beats:
-            beat_location = f"{location}/beat:{beat.beat_id}"
+        for beat in all_beats:
+            beat_arc = beat_to_arc[beat.beat_id]
+            beat_location = f"graph/beat:{beat.beat_id}"
             if not beat.transitions:
-                issues.append(
-                    self._error(
-                        "DEAD_END_BEAT",
-                        "A beat must transition to another beat or an ending.",
-                        beat_location,
-                    )
-                )
+                issues.append(self._error("DEAD_END_BEAT", "A beat must transition to another beat or an ending.", beat_location))
             for transition in beat.transitions:
                 transition_ids.append(transition.transition_id)
                 if transition.target_id not in node_ids:
-                    issues.append(
-                        self._error(
-                            "UNKNOWN_TRANSITION_TARGET",
-                            (
-                                f"Transition {transition.transition_id} targets "
-                                f"unknown node {transition.target_id}."
-                            ),
-                            beat_location,
-                        )
-                    )
+                    issues.append(self._error("UNKNOWN_TRANSITION_TARGET", f"Transition {transition.transition_id} targets unknown node {transition.target_id}.", beat_location))
                 else:
                     adjacency[beat.beat_id].add(transition.target_id)
+                    # Disallow side-to-side cross-arc transitions
+                    target_arc = beat_to_arc.get(transition.target_id, "")
+                    if beat_arc != "main" and target_arc not in ("main", "", beat_arc):
+                        issues.append(self._error("CROSS_SIDE_ARC_TRANSITION", f"Side arc beat {beat.beat_id} ({beat_arc}) transitions to different side arc beat {transition.target_id} ({target_arc}).", beat_location))
 
-            unknown_prerequisites = set(beat.prerequisites) - set(beat_ids)
-            if unknown_prerequisites:
-                issues.append(
-                    self._error(
-                        "UNKNOWN_PREREQUISITE",
-                        (
-                            "Beat references unknown prerequisites: "
-                            f"{sorted(unknown_prerequisites)}"
-                        ),
-                        beat_location,
-                    )
-                )
-            if beat.beat_id in beat.prerequisites:
-                issues.append(
-                    self._error(
-                        "SELF_PREREQUISITE",
-                        "A beat cannot require itself.",
-                        beat_location,
-                    )
-                )
-            if beat.reconverges_at and beat.reconverges_at not in set(beat_ids):
-                issues.append(
-                    self._error(
-                        "UNKNOWN_RECONVERGENCE",
-                        f"Unknown reconvergence beat: {beat.reconverges_at}",
-                        beat_location,
-                    )
-                )
+                    # 地理一致性：transition goal 描述必须与当前 beat 场景位置相关
+                    src_beat = beat
+                    goal = (transition.goal or "").lower()
+                    plot = (src_beat.plot or "").lower()
+                    # 提取 goal 中暗示位置的关键词（镇外/旧庙/山中等）
+                    goal_location_hints = ["镇外", "小镇", "灌江口", "集市", "杨府", "府内", "街道"]
+                    plot_has_location = any(loc in plot for loc in goal_location_hints)
+                    goal_has_contradict = False
+                    for loc in goal_location_hints:
+                        if loc in goal and loc not in plot:
+                            goal_has_contradict = True
+                            break
+                    # 如果 goal 暗示了地点但该地点不在 beat plot 里，报告警告
+                    if goal_has_contradict:
+                        issues.append(self._warning(
+                            "TRANSITION_GOAL_LOCATION_MISMATCH",
+                            f"Transition goal mentions a location not present in beat plot: transition={transition.transition_id} goal='{transition.goal[:40]}...' beat={beat.beat_id}",
+                            beat_location
+                        ))
 
         for duplicate in self._duplicates(transition_ids):
-            issues.append(
-                self._error(
-                    "DUPLICATE_TRANSITION_ID",
-                    f"Transition id is duplicated: {duplicate}",
-                    location,
-                )
-            )
+            issues.append(self._error("DUPLICATE_TRANSITION_ID", f"Transition id is duplicated: {duplicate}", "graph"))
 
-        if start_beat_id in adjacency:
-            reachable = self._reachable(start_beat_id, adjacency)
+        # Reachability from main arc start
+        start = plan.main_arc.beats[0].beat_id if plan.main_arc.beats else ""
+        if start in adjacency:
+            reachable = self._reachable(start, adjacency)
             unreachable = node_ids - reachable
             for node_id in sorted(unreachable):
-                issues.append(
-                    self._error(
-                        "UNREACHABLE_NODE",
-                        f"Node cannot be reached from the arc start: {node_id}",
-                        location,
-                    )
-                )
+                issues.append(self._error("UNREACHABLE_NODE", f"Node cannot be reached from the story start: {node_id}", "graph"))
 
-            can_reach_ending = self._nodes_reaching_endings(adjacency, set(ending_ids))
-            for beat_id in sorted(set(beat_ids) - can_reach_ending):
-                issues.append(
-                    self._error(
-                        "NO_PATH_TO_ENDING",
-                        f"Beat has no path to any ending: {beat_id}",
-                        location,
-                    )
-                )
+            can_reach_ending = self._nodes_reaching_endings(adjacency, set(all_ending_ids))
+            for beat_id in sorted(set(all_beat_ids) - can_reach_ending):
+                issues.append(self._error("NO_PATH_TO_ENDING", f"Beat has no path to any ending: {beat_id}", "graph"))
 
             if not self.standard.allow_graph_cycles:
-                for cycle in self._cycles(start_beat_id, adjacency, set(ending_ids)):
-                    issues.append(
-                        self._error(
-                            "GRAPH_CYCLE",
-                            f"Story graph contains a cycle: {' -> '.join(cycle)}",
-                            location,
-                        )
-                    )
+                for cycle in self._cycles(start, adjacency, set(all_ending_ids)):
+                    issues.append(self._error("GRAPH_CYCLE", f"Story graph contains a cycle: {' -> '.join(cycle)}", "graph"))
 
         return issues
 
     def _validate_cross_references(self, plan: StoryPlan) -> list[ValidationIssue]:
-        issues: list[ValidationIssue] = []
-        all_beat_ids = {
-            beat.beat_id
-            for beat in (
-                *plan.main_arc.beats,
-                *(beat for arc in plan.side_arcs for beat in arc.beats),
-            )
-        }
-
-        for item in plan.foreshadowing:
-            if item.setup_beat_id not in all_beat_ids:
-                issues.append(
-                    self._error(
-                        "UNKNOWN_FORESHADOW_SETUP",
-                        f"Unknown setup beat: {item.setup_beat_id}",
-                        f"foreshadowing:{item.foreshadowing_id}",
-                    )
-                )
-            if item.payoff_beat_id not in all_beat_ids:
-                issues.append(
-                    self._error(
-                        "UNKNOWN_FORESHADOW_PAYOFF",
-                        f"Unknown payoff beat: {item.payoff_beat_id}",
-                        f"foreshadowing:{item.foreshadowing_id}",
-                    )
-                )
-
-        milestone_ids = set(plan.main_arc.milestones)
-        for arc in plan.side_arcs:
-            unknown = set(arc.unlock.required_milestones) - milestone_ids
-            if unknown:
-                issues.append(
-                    self._error(
-                        "UNKNOWN_UNLOCK_MILESTONE",
-                        f"Side arc uses unknown milestones: {sorted(unknown)}",
-                        f"side_arc:{arc.arc_id}",
-                    )
-                )
-        return issues
+        return []
 
     def _validate_information_boundaries(
         self, plan: StoryPlan
@@ -470,7 +347,7 @@ class StoryPlanValidator:
             *(beat for arc in plan.side_arcs for beat in arc.beats),
         )
         for beat in all_beats:
-            leaked = set(beat.allowed_information) & set(beat.forbidden_reveals)
+            leaked = set(beat.allowed_information) & set(beat.forbidden_information)
             if leaked:
                 issues.append(
                     self._error(

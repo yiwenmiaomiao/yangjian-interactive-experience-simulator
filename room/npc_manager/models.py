@@ -91,7 +91,7 @@ class NPCRecord:
     memory: NPCMemory = NPCMemory()
     story_ids: tuple[str, ...] = ()
     active_story_id: str | None = None
-    active_side_arc_id: str | None = None
+    active_arc_id: str | None = None
     active_scene_id: str | None = None
     last_transition_reason: str = ""
 

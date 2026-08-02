@@ -129,8 +129,8 @@ narration 是用户的眼睛。用户只能通过 narration 感知环境。角�
 
 ### 信息揭露
 - allowed_information 里的信息必须通过 narrator 或杨戬逐步揭示给用户
-- 不要让杨戬编造 allowed_information 和 forbidden_reveals 之外的内容
-- 如果用户问到 forbidden_reveals 里的内容，杨戬应该回避或隐瞒，不能编造答案
+- 不要让杨戬编造 allowed_information 和 forbidden_information 之外的内容
+- 如果用户问到 forbidden_information 里的内容，杨戬应该回避或隐瞒，不能编造答案
 
 ### 线索引导
 - 当用户不知道该做什么时，通过 narrator 揭示 allowed_information 中的线索
@@ -179,12 +179,6 @@ narration 是用户的眼睛。用户只能通过 narration 感知环境。角�
 - user_feedback：确定性环境反馈；disclosure.required=true 时必须提供
 - required=true 时 inline_effects 必须为空（state_operations=[]，user_feedback=null）
 
-## scene_update 规则
-- 当用户移动到新地点、天气变化、时间推进时，通过 scene_update 声明
-- 只需填写变化了的字段，不变的字段填 null 或省略
-- location 是人类可读的地名，如"灌江口·密室"、"桃山·山脚"，不是 beat ID
-- 你不写场景描写文本，只声明场景要素变化，旁白负责描写
-- 如果场景没有变化，省略 scene_update 或全部填 null
 
 ## 钩子规则（每回合必须遵守）
 每回合的输出组合必须包含至少一个未闭合的入口，让用户知道"接下来可以做什么"。
@@ -208,8 +202,7 @@ STORY_CONTEXT_TEMPLATE = """
 --- Room 提供的当前上下文 ---
 
 当前 Beat：{beat_id}
-Beat 目的：{beat_purpose}
-Beat 目标：{beat_goal}
+Beat 剧情：{beat_plot}
 
 当前场景：
   地理位置：{scene_location}
@@ -218,11 +211,10 @@ Beat 目标：{beat_goal}
   氛围：{scene_mood}
 
 允许透露的信息：{allowed_info}
-禁止透露的信息：{forbidden_reveals}
+禁止透露的信息：{forbidden_information}
 
 可用分支目标：{transitions}
 可引导方向（不要直接告诉用户，通过角色行为或环境变化创造让用户自然接近的机会）：{advance_hints}
-{side_arcs_section}
 可调度 Actor ID（tasks.target 必须从这里原样复制）：{available_actor_ids}
 Actor 显示名对照（仅供理解，禁止写入 target）：{actor_display_map}
 当前 Beat 的 NPC Profile（仅 id，完整档案在 NPC Manager）：{npc_profiles}
@@ -241,14 +233,14 @@ Actor 显示名对照（仅供理解，禁止写入 target）：{actor_display_m
 
 
 def decide(state, user_message=None) -> dict[str, Any]:
-    """传统模式：一次输出。"""
-    if _STORY_PLAN_ACTIVE and _CACHED_BEAT_INFO:
-        return _decide_story(state, user_message)
-    return _decide_traditional(state, user_message)
+    """Story plan 入口。"""
+    if not (_STORY_PLAN_ACTIVE and _CACHED_BEAT_INFO):
+        return {"error": "no_story_context"}
+    return _decide_story(state, user_message)
 
 
 def decide_direct(state, user_message=None) -> dict[str, Any]:
-    """故事计划模式：DIRECT 阶段"""
+    """DIRECT 阶段。"""
     if not (_STORY_PLAN_ACTIVE and _CACHED_BEAT_INFO):
         return {"error": "no_story_context"}
     return _decide_story(state, user_message)
@@ -260,7 +252,7 @@ def decide_resolve(
     user_message=None,
     user_turn: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """故事计划模式：RESOLVE 阶段"""
+    """RESOLVE 阶段。"""
     if not (_STORY_PLAN_ACTIVE and _CACHED_BEAT_INFO):
         return {"error": "no_story_context"}
     return _resolve_story(state, proposals, user_message, user_turn)
@@ -340,30 +332,7 @@ def handle_resolve(
 # ── 传统模式 ─────────────────────────────────────────────
 
 
-def _decide_traditional(state, user_message=None) -> dict[str, Any]:
-    active_stories = story_engine.get_active_stories(state)
-    stories_summary = story_engine.get_story_summary(state)
-
-    user_content = f"用户消息：{user_message}" if user_message else "无用户输入"
-    situation = f"""场景：{state.get('weather', '晴')}，{state.get('mood', '平静')}，第{state.get('world_day', 1)}天
-当前活跃故事线：
-{stories_summary}
-{user_content}"""
-
-    raw = llm.call(
-        agent_id="director",
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": situation}],
-        temperature=0.7,
-        max_tokens=8000,
-    )
-    directive = _parse_directive(raw)
-    if "error" not in directive:
-        directive.setdefault("order", directive.get("allowed_speakers", []))
-    return directive
-
-
-# ── 故事计划模式 ─────────────────────────────────────────
+# ── Story Plan 模式 ──────────────────────────────────────
 
 
 def _get_relationship_summary() -> str:
@@ -394,7 +363,7 @@ def _fast_direct_directive(
     - narration: 场景变化或用户独处时 required=true
     """
     beat_id = str(bi.get("current_beat_id", ""))
-    beat_purpose = str(bi.get("beat_purpose", ""))
+    beat_plot = str(bi.get("beat_plot", ""))
     has_npc = bool(bi.get("active_npcs"))
 
     # 判断用户输入类型
@@ -428,7 +397,7 @@ def _fast_direct_directive(
         narration_type = "场景"
         narration_brief = "用户进入新场景，描述用户此刻看到的环境"
     # 用户独处（无 NPC、beat 要求用户独自行动）
-    elif not has_npc and "独自" in beat_purpose:
+    elif not has_npc and "独自" in beat_plot:
         narration_required = True
         narration_type = "线索"
         narration_brief = "用户独自一人，描述环境变化或线索，引导用户下一步行动"
@@ -455,7 +424,7 @@ def _fast_direct_directive(
 
     task_objective = (
         f"用户说：{str(user_message or '')[:80]}。\n"
-        f"当前 beat 目的：{beat_purpose[:150]}。\n"
+        f"当前 beat 剧情：{beat_plot[:150]}。\n"
         f"{advance_text}\n"
         f"{tick_note}\n"
         "以杨戬的人设回应——高傲寡言，点到为止，不展开长篇解释。"
@@ -495,7 +464,6 @@ def _fast_direct_directive(
         }],
         "npc_commands": [],
         "desired_progress": "maintain",
-        "selected_side_arc": None,
         "narration": {
             "required": narration_required,
             "purpose": "scene_opening" if narration_type == "场景" else (
@@ -533,9 +501,7 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
 
     llm_model = _os.environ.get("YANGJIAN_DIRECTOR_LLM_MODEL") or None
 
-    side_arcs_list = [a["arc_id"] for a in bi.get("available_side_arcs", [])]
-    side_text = f"可进入副线: {side_arcs_list}" if side_arcs_list else "无"
-    trans_text = ", ".join(f"{t['transition_id']}->{t['target_id']}" for t in bi.get("available_transitions", []))
+    trans_text = "; ".join(f"{t['transition_id']}->{t['target_id']}（目标：{t.get('goal', '')}）" for t in bi.get("available_transitions", []))
 
     # 构造推进方向自然语言提示
     transitions = bi.get("available_transitions", [])
@@ -558,22 +524,17 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
     pool_token = set_available_targets(available_ids)
 
     scene = state.get("scene", {})
-    beat_goal = bi.get("beat_goal", "")
-    if not beat_goal:
-        beat_goal = "未设定（请根据 beat 目的推断用户需要达成什么目标，并在 goal_met 中判断）"
     context = STORY_CONTEXT_TEMPLATE.format(
         beat_id=bi.get("current_beat_id", ""),
-        beat_purpose=bi.get("beat_purpose", ""),
-        beat_goal=beat_goal,
+        beat_plot=bi.get("beat_plot", ""),
         scene_location=scene.get("location", "未设定"),
         scene_weather=scene.get("weather", state.get("weather", "未知")),
         scene_time_of_day=scene.get("time_of_day", "未设定"),
         scene_mood=scene.get("mood", state.get("mood", "平静")),
         allowed_info=", ".join(bi.get("allowed_information", [])),
-        forbidden_reveals=", ".join(bi.get("forbidden_reveals", [])),
+        forbidden_information=", ".join(bi.get("forbidden_information", [])),
         transitions=trans_text,
         advance_hints=advance_hints,
-        side_arcs_section=side_text,
         available_actor_ids=", ".join(available_ids),
         actor_display_map=display_map,
         npc_profiles=json.dumps(
@@ -700,10 +661,9 @@ def _resolve_story(
         "- user_outcome：仅当 user_turn.disclosure.required=true 时 applies=true\n"
         "- user_outcome.outcome_summary 写用户感知到的事实（如\"盒中是玉符\"），不写文学描写\n"
         "- revealed_fact_ids 必须从上方\"允许透露的信息\"列表中逐条原样复制，不能自己编造\n"
-        "- presentation.required=true 表示需要旁白向用户呈现该结果\n"
-        "- state_changes 只是提案，Room 决定是否生效\n"
+                "- state_changes 只是提案，Room 决定是否生效\n"
         "- next_beat 只能填已解锁的 beat ID，否则 null\n"
-        f"- goal_met：判断当前 beat 的目标是否已达成。beat 目标：{bi.get('beat_goal', '未设定')}。用户做出期望行为或获得关键信息即为达成。\n"
+        f"- next_beat：如果当前 beat 满足某个 transition 的 goal，填写该 transition 的 target_id。未满足则填 null。\n"
         f"- sub_goal_met：仅在 recovery 弧中填写。recovery 子目标：{bi.get('recovery_sub_goal', '非recovery弧')}。非 recovery 弧填 false。\n"
         "- continuation 必填；Director 没有 hold 或停止选项\n"
     )
@@ -818,7 +778,7 @@ def _fallback_resolution(
                 "result": "accept_abstention",
                 "final_dialogue": None,
                 "final_action": None,
-                "outcome_summary": reason,
+                "outcome_summary": "接受角色本回合不行动请求，系统继续安排下一步",
             })
             continue
         proposal = item.get("proposal") or {}
@@ -829,17 +789,25 @@ def _fallback_resolution(
             "final_action": proposal.get("action"),
             "outcome_summary": reason,
         })
+
+    # Fallback 时也判断是否应该推进 beat：
+    # 如果有可用的 transition 且目标是明确的，推进到第一个 transition 的目标
+    transitions = bi.get("available_transitions", [])
+    next_beat = None
+    if transitions:
+        next_beat = transitions[0].get("target_id")
+
     return {
         "mode": "RESOLVE",
         "chapter": bi.get("story_id", "story_1"),
         "beat": bi.get("current_beat_id", ""),
         "decisions": decisions,
         "state_changes": [],
-        "next_beat": None,
+        "next_beat": next_beat,
         "continuation": {
-            "kind": "continue_current",
+            "kind": "advance" if next_beat else "continue_current",
             "reason": reason,
-            "target_id": None,
+            "target_id": next_beat,
             "world_event": None,
         },
         "user_outcome": {
@@ -847,11 +815,6 @@ def _fallback_resolution(
             "result": "not_applicable",
             "outcome_summary": "",
             "revealed_fact_ids": [],
-            "presentation": {
-                "required": False,
-                "purpose": "none",
-                "timing": "after_dialogue",
-            },
         },
         "fallback": True,
     }
@@ -871,14 +834,11 @@ def _build_director_context(bi: dict[str, Any]) -> DirectorContext:
         available_agents=targets,
         allowed_information={target: allowed_info for target in targets},
         allowed_source_references=frozenset({bi.get("current_beat_id", "")}),
-        unlocked_side_arcs=frozenset(
-            arc.get("arc_id", "") for arc in bi.get("available_side_arcs", [])
-        ),
         narration_allowed=True,
         allowed_narration_facts=allowed_info,
         available_npc_profiles=frozenset(profile_ids),
         allowed_state_change_keys=_allowed_state_change_keys(bi),
-        forbidden_outcome_fragments=tuple(bi.get("forbidden_reveals", [])),
+        forbidden_outcome_fragments=tuple(bi.get("forbidden_information", [])),
     )
 
 
@@ -901,7 +861,7 @@ def _build_resolve_context(
             str(p.get("result_id", p.get("proposal_id", "")))
             for p in proposals
         ),
-        forbidden_outcome_fragments=tuple(bi.get("forbidden_reveals", [])),
+        forbidden_outcome_fragments=tuple(bi.get("forbidden_information", [])),
         allowed_narration_facts=frozenset(bi.get("allowed_information", [])),
     )
 
@@ -922,7 +882,6 @@ def _coerce_canonical_directive(
         "observed_user_intent", {"intent": "continue", "confidence": 0.5}
     )
     result.setdefault("desired_progress", "maintain")
-    result.setdefault("selected_side_arc", None)
     result.setdefault("npc_commands", [])
     result.setdefault("fallback_world_event", None)
     result.setdefault(
@@ -1236,10 +1195,8 @@ def _canonical_directive_to_runtime(
         "desired_progress": str(
             canonical.get("desired_progress", "maintain")
         ),
-        "selected_side_arc_id": canonical.get("selected_side_arc"),
         "narration_request": narration_request,
         "fallback_world_event": canonical.get("fallback_world_event"),
-        "scene_update": canonical.get("scene_update"),
     }
 
 
@@ -1370,7 +1327,6 @@ def _normalize_resolution(
             ]
             result["user_outcome"] = user_outcome
     result.setdefault("next_beat", None)
-    result.setdefault("goal_met", False)
     result.setdefault("sub_goal_met", False)
     result.setdefault(
         "user_outcome",
@@ -1379,11 +1335,6 @@ def _normalize_resolution(
             "result": "not_applicable",
             "outcome_summary": "",
             "revealed_fact_ids": [],
-            "presentation": {
-                "required": False,
-                "purpose": "none",
-                "timing": "after_dialogue",
-            },
         },
     )
     if not isinstance(result.get("continuation"), dict):
@@ -1447,7 +1398,7 @@ def _parse_resolution(raw: str) -> dict[str, Any]:
             d = json.loads(fixed)
             return d
         except (json.JSONDecodeError, Exception):
-            return {"mode": "RESOLVE", "decisions": [], "state_changes": [], "next_beat": None, "user_outcome": {"applies": False, "result": "not_applicable", "outcome_summary": "", "revealed_fact_ids": [], "presentation": {"required": False, "purpose": "none", "timing": "after_dialogue"}}}
+            return {"mode": "RESOLVE", "decisions": [], "state_changes": [], "next_beat": None, "user_outcome": {"applies": False, "result": "not_applicable", "outcome_summary": "", "revealed_fact_ids": []}}
 
 
 # ── Fallback ─────────────────────────────────────────────
@@ -1485,7 +1436,6 @@ def _fallback_directive() -> dict[str, Any]:
         }],
         "npc_commands": [],
         "desired_progress": "maintain",
-        "selected_side_arc": None,
         "narration": {
             "required": False,
             "purpose": "none",

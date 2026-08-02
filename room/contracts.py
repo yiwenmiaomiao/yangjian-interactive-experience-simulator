@@ -199,9 +199,6 @@ class PresentationRequest:
 class UserFeedback:
     outcome_summary: str
     revealed_fact_ids: tuple[str, ...] = ()
-    presentation: PresentationRequest = field(
-        default_factory=lambda: PresentationRequest()
-    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -216,9 +213,6 @@ class UserOutcome:
     result: str = "not_applicable"
     outcome_summary: str = ""
     revealed_fact_ids: tuple[str, ...] = ()
-    presentation: PresentationRequest = field(
-        default_factory=lambda: PresentationRequest()
-    )
 
     def __post_init__(self) -> None:
         if self.result not in {
@@ -239,7 +233,6 @@ class DirectorDirectInput:
     npc_requirements: tuple[Mapping[str, Any], ...] = ()
     npc_registry: Mapping[str, Any] = field(default_factory=dict)
     unlocked_transitions: tuple[Mapping[str, Any], ...] = ()
-    available_side_arcs: tuple[Mapping[str, Any], ...] = ()
     recent_confirmed_events: tuple[Mapping[str, Any], ...] = ()
     liveness: Mapping[str, Any] = field(default_factory=dict)
 
@@ -260,7 +253,6 @@ class DirectorDirective:
     )
     npc_commands: tuple[NPCCommand, ...] = ()
     desired_progress: str = "maintain"
-    selected_side_arc_id: str | None = None
     narration_request: NarrationRequest | None = None
     fallback_world_event: Mapping[str, Any] | None = None
 
@@ -689,9 +681,6 @@ def _user_outcome_from_dict(data: Mapping[str, Any] | None) -> UserOutcome:
         result=str(data.get("result", "not_applicable")),
         outcome_summary=str(data.get("outcome_summary", "")),
         revealed_fact_ids=tuple(data.get("revealed_fact_ids", ())),
-        presentation=_presentation_request_from_dict(
-            data.get("presentation")
-        ),
     )
 
 
@@ -749,7 +738,6 @@ def director_directive_from_dict(
             if isinstance(item, Mapping)
         ),
         desired_progress=str(data.get("desired_progress", "maintain")),
-        selected_side_arc_id=data.get("selected_side_arc_id"),
         narration_request=narration_request,
         fallback_world_event=(
             dict(data["fallback_world_event"])

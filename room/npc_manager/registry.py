@@ -98,7 +98,7 @@ def find_reuse_candidates(
         if requirement.narrative_function in profile.supported_functions:
             score += 3
             reasons.append("narrative_function")
-        if _same_text(profile.short_background, requirement.background_requirement):
+        if _same_text(profile.short_background, requirement.npc_background):
             score += 2
             reasons.append("background")
         if _same_text(

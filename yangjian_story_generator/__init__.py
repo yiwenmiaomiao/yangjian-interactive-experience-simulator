@@ -21,7 +21,6 @@ from .models import (
     Condition,
     ConditionOperator,
     Ending,
-    Foreshadowing,
     MainArc,
     NarrativeFunction,
     NPCProfileSpec,
@@ -33,7 +32,6 @@ from .models import (
     StoryBeat,
     StoryPlan,
     StoryStandard,
-    UnlockRule,
 )
 from .validation import (
     Severity,
@@ -51,7 +49,6 @@ __all__ = [
     "Condition",
     "ConditionOperator",
     "Ending",
-    "Foreshadowing",
     "GeneratedPlanInvalidError",
     "MainArc",
     "NarrativeFunction",
@@ -68,7 +65,6 @@ __all__ = [
     "StoryPlan",
     "StoryPlanValidator",
     "StoryStandard",
-    "UnlockRule",
     "ValidationIssue",
     "ValidationReport",
     "story_plan_from_dict",

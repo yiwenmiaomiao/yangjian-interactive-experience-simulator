@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-import os, json
+import os, json, re
 from typing import Any
 import llm
 if __package__:
@@ -41,13 +41,6 @@ def _load_memory():
 
 
 SYSTEM_PROMPT_HEAD = """你是杨戬，二郎显圣真君。"""
-
-STRUCTURED_SYSTEM_PROMPT = """你是杨戬。你会收到本回合任务和 Room 已公开的消息记录。
-perception 是你额外可感知但不一定公开的事实。
-
-你可以提出对白或动作，也可以请求本回合不行动。
-不行动只是请求，Director 会裁决。不要输出“沉默”“站着不动”来伪装行动。
-不要宣布动作成功，不要修改 Room 状态，不要替其他角色说话。"""
 
 
 def _format_public_message(message: Any) -> str:
@@ -87,16 +80,86 @@ def _summarize_history(messages: list, recent_count: int = 3) -> str:
 
 def _build_turn_prompt(turn_input: contracts.YangJianTurnInput) -> str:
     lines = [
-        f"本回合任务：{turn_input.task.objective}",
+        "## 本回合任务：",
+        turn_input.task.objective,
     ]
     if turn_input.task.success_condition.strip():
         lines.append(f"成功条件：{turn_input.task.success_condition}")
+    
+    # 场景信息（从 beat plan 传入）
+    scene = turn_input.scene or {}
+    if scene:
+        scene_parts = []
+        if scene.get("location"):
+            scene_parts.append(f"当前地点：{scene['location']}")
+        if scene.get("time_of_day"):
+            scene_parts.append(f"时间：{scene['time_of_day']}")
+        if scene.get("weather"):
+            scene_parts.append(f"天气：{scene['weather']}")
+        if scene.get("mood"):
+            scene_parts.append(f"氛围：{scene['mood']}")
+        if scene_parts:
+            lines.append("")
+            lines.append("## 场景：")
+            for p in scene_parts:
+                lines.append(f"- {p}")
+    
     if turn_input.perception:
-        lines.append("额外感知：")
+        lines.append("")
+        lines.append("## 额外感知：")
+        
+        date_str = ""
+        weather_str = ""
+        atmos_str = ""
+        events_str = ""
+        rel_str = ""
+        others = []
+        
         for fact in turn_input.perception:
-            if fact.text.strip():
-                lines.append(f"- {fact.text}")
-    lines.append("公开消息：")
+            text = fact.text.strip()
+            if not text:
+                continue
+            
+            # 独立处理人物认知区块
+            if "对小仙汉的当前认知" in text:
+                rel_str = text if text.startswith("##") else f"## {text}"
+                continue
+                
+            # 去除可能自带的横杠，便于重新格式化
+            if text.startswith("- "):
+                text = text[2:]
+                
+            # 分类与格式化
+            if re.match(r"^第\d+天$", text):
+                date_str = f"- 日期：{text}"
+            elif text.startswith("天气："):
+                weather_str = f"- {text}"
+            elif text.startswith("氛围："):
+                atmos_str = f"- {text}"
+            elif text.startswith("最近事件："):
+                events_str = f"- 最近事件：\n{text[5:].strip()}"
+            else:
+                others.append(text)
+        
+        # 强制按照需要的顺序渲染
+        if date_str: lines.append(date_str)
+        if weather_str: lines.append(weather_str)
+        if atmos_str: lines.append(atmos_str)
+        if events_str: lines.append(events_str)
+        
+        for o in others:
+            if "\n" in o:
+                lines.append(o)
+            else:
+                lines.append(f"- {o}")
+                
+        # 认知状态放在最后
+        if rel_str:
+            lines.append("")
+            lines.append(rel_str)
+
+    lines.append("")
+    lines.append("## 公开消息：")
     history = list(turn_input.public_room_history)
     lines.append(_summarize_history(history))
     return "\n".join(lines)
@@ -130,7 +193,7 @@ def act_turn(turn_input: contracts.YangJianTurnInput) -> dict:
         data = call_structured(
             ActorTurnOutput,
             agent_id="yangjian",
-            system=f"{STRUCTURED_SYSTEM_PROMPT}\n\n## SOUL\n{_load_soul()}",
+            system=_load_soul(),
             messages=[{
                 "role": "user",
                 "content": _build_turn_prompt(turn_input),

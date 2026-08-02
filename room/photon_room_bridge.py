@@ -39,6 +39,15 @@ def ensure_story_active():
         room_mod._story_plan_active = True
         return True
 
+    # Handle completed stories - allow them to continue (don't reset)
+    if persisted_state.get("status") == "completed":
+        beat_info = ss.get_current_beat_info(persisted_state)
+        if not beat_info.get("error"):
+            director.set_story_context(beat_info)
+            room_mod._story_plan_active = True
+            return True
+        return False
+
     # Only a pristine inactive state starts from the first beat. Completed or
     # otherwise progressed stories must never be reset implicitly on startup.
     if (

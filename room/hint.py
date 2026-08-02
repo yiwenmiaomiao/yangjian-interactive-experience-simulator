@@ -4,7 +4,7 @@
 提示是 meta 操作：
 - 不推进剧情、不调 director/actor、不改变状态
 - 基于当前 beat 目的 + 可用推进方向 + 已确认事实 + 关系状态
-- 回答用户疑问，但不剧透（不透露 forbidden_reveals、不直接给答案）
+- 回答用户疑问，但不剧透（不透露 forbidden_information、不直接给答案）
 - 调一次 LLM（deepseek-chat 非推理模型）生成 1-3 句解答
 """
 from __future__ import annotations
@@ -90,10 +90,10 @@ def generate_hint(
 
         # 收集上下文
         beat_id = bi.get("current_beat_id", "")
-        beat_purpose = bi.get("beat_purpose", "")
+        beat_plot = bi.get("beat_plot", "")
         transitions = bi.get("available_transitions", [])
         allowed_info = bi.get("allowed_information", [])
-        forbidden_reveals = bi.get("forbidden_reveals", [])
+        forbidden_information = bi.get("forbidden_information", [])
 
         # 推进方向
         if transitions:
@@ -136,7 +136,7 @@ def generate_hint(
                 "规则：\n"
                 "1. 直接回答用户的疑问，不要回避\n"
                 "2. 只使用当前剧情中已经公开的信息（已确认事实、已发布消息）\n"
-                "3. 不得剧透：不透露 forbidden_reveals 中的内容，不透露未来剧情走向\n"
+                "3. 不得剧透：不透露 forbidden_information 中的内容，不透露未来剧情走向\n"
                 "4. 如果用户的疑问涉及尚未揭露的信息，告诉用户\"目前还不清楚\"或\"还需要进一步探索\"\n"
                 "5. 用第二人称\"你\"视角，语气自然，像一个了解剧情的旁白在解答\n"
                 "6. 一到三句话，不超过150字\n"
@@ -146,13 +146,13 @@ def generate_hint(
             prompt = (
                 f"用户的疑问：{user_question}\n\n"
                 f"当前剧情节点：{beat_id}\n"
-                f"节点目的：{beat_purpose[:200]}\n"
+                f"节点剧情：{beat_plot[:200]}\n"
                 f"当前场景：\n{scene_text}\n"
                 f"推进方向：{advance_text}\n"
                 f"当前关系：{rel_text}\n"
                 f"已确认事实：\n{facts_text[:500]}\n"
                 f"最近事件：\n{recent_events}\n"
-                f"禁止透露：{', '.join(forbidden_reveals) if forbidden_reveals else '无'}\n\n"
+                f"禁止透露：{', '.join(forbidden_information) if forbidden_information else '无'}\n\n"
                 f"请回答用户的疑问。"
             )
         else:
@@ -169,7 +169,7 @@ def generate_hint(
             )
             prompt = (
                 f"当前剧情节点：{beat_id}\n"
-                f"节点目的：{beat_purpose[:200]}\n"
+                f"节点剧情：{beat_plot[:200]}\n"
                 f"推进方向：{advance_text}\n"
                 f"当前场景：\n{scene_text}\n"
                 f"当前关系：{rel_text}\n"

@@ -52,7 +52,7 @@ def transition(
     trigger: TransitionTrigger,
     reason: str,
     story_id: str | None = None,
-    side_arc_id: str | None = None,
+    arc_id: str | None = None,
     scene_id: str | None = None,
 ) -> NPCRecord:
     """Transition an NPC record and update its active bindings."""
@@ -80,9 +80,9 @@ def transition(
             )
 
     if target is NPCStatus.ACTIVE:
-        if not story_id or not side_arc_id or not scene_id:
+        if not story_id or not arc_id or not scene_id:
             raise ValueError(
-                "Activating an NPC requires story_id, side_arc_id and scene_id"
+                "Activating an NPC requires story_id, arc_id and scene_id"
             )
         story_ids = (
             record.story_ids
@@ -94,7 +94,7 @@ def transition(
             profile=replace(record.profile, status=target),
             story_ids=story_ids,
             active_story_id=story_id,
-            active_side_arc_id=side_arc_id,
+            active_arc_id=arc_id,
             active_scene_id=scene_id,
             last_transition_reason=reason,
         )
@@ -112,7 +112,7 @@ def transition(
             record,
             profile=replace(record.profile, status=target),
             active_story_id=None,
-            active_side_arc_id=None,
+            active_arc_id=None,
             active_scene_id=None,
             last_transition_reason=reason,
         )

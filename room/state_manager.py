@@ -121,12 +121,7 @@ def apply_changes(state, changes):
     if "world_day" in changes:
         state["world_day"] = changes["world_day"]
     
-    # scene_update: 合并非 null 字段
-    scene_update = changes.get("scene_update")
-    if isinstance(scene_update, dict):
-        for k, v in scene_update.items():
-            if v is not None:
-                scene[k] = v
+
     
     story_changes = changes.get("stories", {})
     for story_key, story_data in story_changes.items():

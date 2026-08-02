@@ -237,6 +237,14 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
         "flags": dict(state.get("flags", {})),
         "consequences": list(state.get("selected_branch_consequences", [])),
         "relationship_checkpoint": getattr(beat, "relationship_checkpoint", None),
+        # recovery 状态（即使非 recovery 也返回，保持结构一致）
+        "in_recovery": state.get("in_recovery", False),
+        "recovery_arc_id": state.get("recovery_arc_id"),
+        "recovery_sub_goal": state.get("recovery_sub_goal", ""),
+        "recovery_rejoin_target": state.get("recovery_rejoin_target"),
+        "recovery_max_turns": state.get("recovery_max_turns", RECOVERY_MAX_TURNS_DEFAULT),
+        "recovery_sub_goal_met": state.get("recovery_sub_goal_met", False),
+        "recovery_tick_counter": state.get("recovery_tick_counter", 0),
     }
 
 

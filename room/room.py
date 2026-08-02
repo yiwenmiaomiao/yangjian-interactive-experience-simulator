@@ -1561,6 +1561,14 @@ def _tick_storyline(state, user_message=None, source="cron", lf_ctx=None):
                 },
             )
 
+            # ── auto-hint：当钩子输出后，说明用户可以输入 #问题# 获取进一步提示 ──
+            hint_marker = {
+                "role": "提示",
+                "text": "输入 #问题# 可以向提示系统提问，例如 #我可以做什么#",
+                "kind": "meta",
+            }
+            outputs.append(hint_marker)
+
     order = [output["role"] for output in outputs] + ["用户"]
 
     # Phase 4: Room 保存 + 事实管理

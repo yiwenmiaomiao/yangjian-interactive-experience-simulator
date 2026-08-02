@@ -1,5 +1,4 @@
 """Model-agnostic orchestration for story generation."""
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -13,6 +12,8 @@ from .models import (
     StoryStandard,
 )
 from .ports import AsyncStructuredModelClient, StructuredModelClient
+from .review_report import GeneratedPlanReviewError, ReviewReport
+from .story_reviewer import review_plan
 from .validation import StoryPlanValidator, ValidationReport
 
 
@@ -57,6 +58,7 @@ class StoryGenerator:
         character: CharacterContext,
         preferences: PreferenceSnapshot,
         brief: StoryBrief,
+        skip_review: bool = False,
     ) -> StoryPlan:
         payload = self.build_payload(
             character=character,
@@ -64,7 +66,10 @@ class StoryGenerator:
             brief=brief,
         )
         raw_plan = self._model_client.generate_story_plan(payload)
-        return _parse_and_validate(raw_plan, self._validator)
+        plan = _parse_and_validate(raw_plan, self._validator)
+        if not skip_review:
+            _review(plan)
+        return plan
 
     def build_payload(
         self,
@@ -74,7 +79,6 @@ class StoryGenerator:
         brief: StoryBrief,
     ) -> dict[str, Any]:
         """Build a deterministic, SDK-independent generation payload."""
-
         return _build_payload(
             character=character,
             preferences=preferences,
@@ -115,15 +119,18 @@ class AsyncStoryGenerator:
         character: CharacterContext,
         preferences: PreferenceSnapshot,
         brief: StoryBrief,
+        skip_review: bool = False,
     ) -> StoryPlan:
-        payload = _build_payload(
+        payload = self.build_payload(
             character=character,
             preferences=preferences,
             brief=brief,
-            standard=self._standard,
         )
         raw_plan = await self._model_client.generate_story_plan(payload)
-        return _parse_and_validate(raw_plan, self._validator)
+        plan = _parse_and_validate(raw_plan, self._validator)
+        if not skip_review:
+            _review(plan)
+        return plan
 
     def build_payload(
         self,
@@ -174,3 +181,10 @@ def _parse_and_validate(
     if not report.is_valid:
         raise GeneratedPlanInvalidError(report)
     return plan
+
+
+def _review(plan: StoryPlan) -> None:
+    """Run LLM review; raises GeneratedPlanReviewError on critical errors."""
+    report = review_plan(plan)
+    if report.errors:
+        raise GeneratedPlanReviewError(report)

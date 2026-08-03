@@ -23,7 +23,17 @@ PROJECT_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 )))
 SOUL_PATH = os.path.join(PROJECT_DIR, "SOUL.md")
-MEMORY_PATH = os.path.join(PROJECT_DIR, "memories", "MEMORY.md")
+
+# Per-story MEMORY.md 路径
+def _get_memory_path():
+    try:
+        import story_state as ss
+        story_id = getattr(ss, "_current_story_id", "story_1")
+        d = os.path.join(PROJECT_DIR, "memories", story_id)
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "MEMORY.md")
+    except Exception:
+        return os.path.join(PROJECT_DIR, "memories", "MEMORY.md")
 
 
 def _load_soul():
@@ -33,10 +43,11 @@ def _load_soul():
 
 
 def _load_memory():
-    """加载杨戬当前感知记忆"""
-    if not os.path.exists(MEMORY_PATH):
+    """加载杨戬当前感知记忆（per-story）"""
+    path = _get_memory_path()
+    if not os.path.exists(path):
         return "无近期记忆"
-    with open(MEMORY_PATH, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
 

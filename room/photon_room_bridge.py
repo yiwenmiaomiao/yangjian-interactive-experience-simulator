@@ -12,20 +12,22 @@ if __package__:
     import story_state as ss, director
     import runtime_context
     from deliver import deliver_outputs
+    import story_selector
 else:
     from room import tick, format_output
     import room as room_mod
     import story_state as ss, director
     import runtime_context
     from deliver import deliver_outputs
+    import story_selector
 
 
 def ensure_story_active():
+    """确保当前 story 的 plan 已加载并激活。"""
     plan = ss.get_plan()
     if not plan:
-        plan_path = ss.DEFAULT_PLAN_PATH
-        if os.path.exists(plan_path):
-            plan = ss.load_plan(plan_path)
+        # load_plan() 会自动使用 _current_story_id 对应的 plan 文件
+        plan = ss.load_plan()
 
     if not plan:
         return False
@@ -71,6 +73,11 @@ def handle_message(
     close_trace: bool = True,
     lf_ctx=None,
 ) -> dict:
+
+    # ── 故事线选择命令 ───────────────────────────────
+    story_cmd = story_selector.handle_command(user_message)
+    if story_cmd is not None:
+        return story_cmd
 
     # # 前缀 = 提示请求：解析 #问题# 部分，剩余文本作为行动走 room.tick
     if user_message and str(user_message).strip().startswith("#"):

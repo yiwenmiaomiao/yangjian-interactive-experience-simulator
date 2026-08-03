@@ -9,7 +9,20 @@ PROFILE_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
     "YANGJIAN_PROJECT_DIR",
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 )))
-STATE_PATH = os.path.join(PROFILE_DIR, "world_state.json")
+CONTEXTS_DIR = os.path.join(PROFILE_DIR, "contexts")
+
+# Per-story world state 路径
+def _world_path(story_id: str) -> str:
+    return os.path.join(CONTEXTS_DIR, f"{story_id}_world.json")
+
+
+def _current_world_path() -> str:
+    """返回当前 story 的 world state 路径"""
+    try:
+        import story_state as ss
+        return _world_path(ss._current_story_id)
+    except Exception:
+        return _world_path("story_1")
 
 
 def default_state():
@@ -32,8 +45,8 @@ def default_state():
 
 def load():
     """加载世界状态；缺失时创建默认状态并落盘。"""
-    path = runtime_context.scoped_path(STATE_PATH)
-    source = path if os.path.exists(path) else STATE_PATH
+    path = runtime_context.scoped_path(_current_world_path())
+    source = path if os.path.exists(path) else _current_world_path()
     if not os.path.exists(source):
         state = default_state()
         save(state)
@@ -46,8 +59,8 @@ def load():
 
 
 def save(state):
-    """保存世界状态"""
-    path = runtime_context.scoped_path(STATE_PATH)
+    """保存世界状态到当前 story 对应的文件"""
+    path = runtime_context.scoped_path(_current_world_path())
     with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 

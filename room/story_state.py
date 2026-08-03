@@ -21,8 +21,130 @@ PROFILE_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
     "YANGJIAN_PROJECT_DIR",
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 )))
-STORY_STATE_PATH = os.path.join(PROFILE_DIR, "story_state.json")
-DEFAULT_PLAN_PATH = os.path.join(PROFILE_DIR, "contexts/story_plan_story_1.json")
+
+# Per-story 路径
+CONTEXTS_DIR = os.path.join(PROFILE_DIR, "contexts")
+STORY_CONFIG_PATH = os.path.join(CONTEXTS_DIR, "story_config.json")
+MEMORIES_DIR = os.path.join(PROFILE_DIR, "memories")
+
+# 全局运行时 story_id
+_current_story_id: str = "story_1"
+
+# ── 路径工具 ───────────────────────────────────────────
+
+
+def _state_path(story_id: str) -> str:
+    return os.path.join(CONTEXTS_DIR, f"{story_id}_state.json")
+
+
+def _plan_path(story_id: str) -> str:
+    return os.path.join(CONTEXTS_DIR, f"story_plan_{story_id}.json")
+
+
+def _default_plan_path() -> str:
+    """返回当前 story_id 对应的 plan 路径"""
+    return _plan_path(_current_story_id)
+
+
+def _memory_dir(story_id: str) -> str:
+    d = os.path.join(MEMORIES_DIR, story_id)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _memory_path(story_id: str) -> str:
+    return os.path.join(_memory_dir(story_id), "MEMORY.md")
+
+
+# ── 当前 story ID 管理 ─────────────────────────────────
+
+def get_current_story_id() -> str:
+    """从 story_config.json 读取当前激活的 story_id"""
+    if os.path.exists(STORY_CONFIG_PATH):
+        with open(STORY_CONFIG_PATH, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg.get("current_story_id", "story_1")
+    return "story_1"
+
+
+def _init_current_story():
+    """初始化当前 story_id（从配置恢复或默认 story_1）"""
+    global _current_story_id
+    _current_story_id = get_current_story_id()
+
+
+# ── 迁移 ───────────────────────────────────────────────
+
+def _migrate_if_needed():
+    """首次运行时将旧单文件迁移到 per-story 结构"""
+    old_state = os.path.join(PROFILE_DIR, "story_state.json")
+    old_world = os.path.join(PROFILE_DIR, "world_state.json")
+    old_memory = os.path.join(MEMORIES_DIR, "MEMORY.md")
+
+    # 如果旧 state 文件存在但新的 story_1_state 不存在，执行迁移
+    if os.path.exists(old_state) and not os.path.exists(_state_path("story_1")):
+        with open(old_state, encoding="utf-8") as f:
+            state = json.load(f)
+        # 确保 story_id 正确
+        state["story_id"] = "story_1"
+        with open(_state_path("story_1"), "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        print(f"[story_state] migrated {old_state} -> story_1_state.json", flush=True)
+
+    if os.path.exists(old_world) and not os.path.exists(
+        os.path.join(CONTEXTS_DIR, "story_1_world.json")
+    ):
+        import shutil
+        shutil.copy(old_world, os.path.join(CONTEXTS_DIR, "story_1_world.json"))
+        print(f"[story_state] migrated world_state.json -> story_1_world.json", flush=True)
+
+    # 建立 story_1 memory 目录
+    _memory_dir("story_1")
+    if os.path.exists(old_memory) and not os.path.exists(_memory_path("story_1")):
+        import shutil
+        shutil.copy(old_memory, _memory_path("story_1"))
+        print(f"[story_state] migrated MEMORY.md -> story_1/MEMORY.md", flush=True)
+
+    # 生成 story_config.json
+    if not os.path.exists(STORY_CONFIG_PATH):
+        available = _scan_available_stories()
+        config = {
+            "current_story_id": "story_1",
+            "available_stories": available,
+        }
+        with open(STORY_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        print(f"[story_state] created story_config.json", flush=True)
+
+    # 初始化当前 story_id
+    _init_current_story()
+
+
+def _scan_available_stories() -> list[dict]:
+    """扫描 contexts/story_plan_*.json，返回可用故事列表"""
+    import glob
+    import re
+    result = []
+    for path in sorted(glob.glob(os.path.join(CONTEXTS_DIR, "story_plan_*.json"))):
+        fname = os.path.basename(path)
+        m = re.match(r"story_plan_(.+)\.json", fname)
+        if not m:
+            continue
+        sid = m.group(1)
+        try:
+            from yangjian_story_generator.codec import story_plan_from_json
+            plan = story_plan_from_json(open(path, encoding="utf-8").read())
+            result.append({
+                "story_id": sid,
+                "theme": plan.theme,
+            })
+        except Exception:
+            result.append({"story_id": sid, "theme": "（加载失败）"})
+    return result
+
+
+# 执行迁移检查（模块加载时自动触发一次）
+_migrate_if_needed()
 
 # 引入 story_plan 解析
 _plan: StoryPlan | None = None
@@ -45,11 +167,14 @@ RECOVERY_MAX_TURNS_DEFAULT = _ROOM_CONFIG.get("recovery_max_turns_default", 4)
 
 
 def load_plan(path: str | None = None) -> StoryPlan | None:
-    """加载故事计划。"""
+    """加载故事计划。
+
+    path 为空时自动使用当前 _current_story_id 对应的 plan 文件。
+    """
     from yangjian_story_generator.codec import story_plan_from_json
 
     global _plan
-    p = path or DEFAULT_PLAN_PATH
+    p = path or _default_plan_path()
     if not os.path.exists(p):
         return None
     with open(p, encoding="utf-8") as f:
@@ -95,13 +220,14 @@ def default_state() -> dict[str, Any]:
 
 
 def load_state() -> dict[str, Any]:
-    path = runtime_context.scoped_path(STORY_STATE_PATH)
+    """加载当前 story 的运行状态。"""
+    path = runtime_context.scoped_path(_state_path(_current_story_id))
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             state = json.load(f)
     else:
         return default_state()
-    
+
     # 验证和修复 active 状态
     if state.get("status") == "active":
         # active 状态必须有 story_id
@@ -112,12 +238,14 @@ def load_state() -> dict[str, Any]:
         # active 状态的 completed_endings 应该清空（这是当前故事，不是已完成的）
         if state.get("completed_endings"):
             state["completed_endings"] = []
-    
+
     return state
 
 
 def save_state(state: dict[str, Any]) -> None:
-    with open(runtime_context.scoped_path(STORY_STATE_PATH), "w", encoding="utf-8") as f:
+    """保存当前 story 的运行状态。"""
+    path = runtime_context.scoped_path(_state_path(_current_story_id))
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
@@ -128,8 +256,11 @@ def reset_state() -> dict[str, Any]:
 
 
 def activate_plan() -> dict[str, Any]:
-    """激活故事计划，设置起始 beat。"""
+    """激活故事计划（当前 story），设置起始 beat。"""
     plan = get_plan()
+    if not plan:
+        # 确保 plan 已加载
+        plan = load_plan()
     if not plan:
         return default_state()
     state = default_state()
@@ -138,6 +269,90 @@ def activate_plan() -> dict[str, Any]:
     state["current_beat_id"] = plan.main_arc.beats[0].beat_id
     save_state(state)
     return state
+
+
+def switch_story(new_story_id: str) -> dict[str, Any]:
+    """切换到指定 story。
+
+    流程：
+    1. 保存当前 story 的 state
+    2. 更新 _current_story_id
+    3. 加载新 story 的 state（不存在则 activate）
+    4. 重新加载 plan
+    5. 更新 story_config.json
+    """
+    global _current_story_id
+
+    old_sid = _current_story_id
+    if old_sid == new_story_id:
+        # 已在该 story，加载并返回当前状态
+        current_state = load_state()
+        return {
+            "ok": True,
+            "message": f"当前已在 {new_story_id} 故事线中，无需切换。",
+            "state": current_state,
+        }
+
+    # 1. 保存当前 story（显式保存，确保落盘）
+    current_state = load_state()
+    save_state(current_state)
+
+    # 2. 切换
+    _current_story_id = new_story_id
+
+    # 3. 加载或激活新 story
+    plan_path = _plan_path(new_story_id)
+    if os.path.exists(plan_path):
+        load_plan(plan_path)
+        loaded = load_state()
+        if loaded.get("status") == "inactive":
+            new_state = activate_plan()
+        else:
+            new_state = loaded
+    else:
+        # plan 文件不存在，无法切换
+        _current_story_id = old_sid
+        return {"ok": False, "error": f"未找到 {new_story_id} 对应的故事计划文件。"}
+
+    # 4. 更新 story_config.json
+    _refresh_story_config()
+
+    return {
+        "ok": True,
+        "from": old_sid,
+        "to": new_story_id,
+        "state": new_state,
+    }
+
+
+def reset_current_story() -> dict[str, Any]:
+    """重置当前 story 到起始状态。"""
+    state = reset_state()
+    new_state = activate_plan()
+    # 清空 world_state 和 MEMORY.md
+    import state_manager as sm
+    default_ws = sm.default_state()
+    sm.save(default_ws)
+    _clear_memory(_current_story_id)
+    return new_state
+
+
+def _refresh_story_config():
+    """更新 story_config.json 的 current_story_id"""
+    available = _scan_available_stories()
+    cfg = {
+        "current_story_id": _current_story_id,
+        "available_stories": available,
+    }
+    with open(STORY_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def _clear_memory(story_id: str):
+    """清空指定 story 的 MEMORY.md"""
+    p = _memory_path(story_id)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("")
 
 
 # ── 当前 beat 信息（给导演看） ─────────────────────────────

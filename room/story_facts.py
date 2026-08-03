@@ -19,6 +19,15 @@ import state_manager as sm
 CONTEXTS_DIR = sm.CONTEXTS_DIR
 
 
+def _current_sid() -> str:
+    """获取当前 story_id，与 state_manager._current_world_path 同模式。"""
+    try:
+        import story_state as ss
+        return ss._current_story_id
+    except Exception:
+        return "story_1"
+
+
 def _facts_path(story_id: str) -> str:
     return os.path.join(CONTEXTS_DIR, f"{story_id}_facts.json")
 
@@ -42,7 +51,7 @@ def default_facts() -> dict[str, Any]:
 
 def load_facts(story_id: str | None = None) -> dict[str, Any]:
     """加载 facts，默认为当前 story。"""
-    sid = story_id or sm._current_story_id or "story_1"
+    sid = story_id or _current_sid()
     path = runtime_context.scoped_path(_facts_path(sid))
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
@@ -52,7 +61,7 @@ def load_facts(story_id: str | None = None) -> dict[str, Any]:
 
 def save_facts(facts: dict[str, Any], story_id: str | None = None) -> None:
     """保存 facts 到对应 story 目录。"""
-    sid = story_id or sm._current_story_id or "story_1"
+    sid = story_id or _current_sid()
     facts["version"] = facts.get("version", 0) + 1
     facts["updated_at"] = datetime.datetime.now().isoformat()
     path = runtime_context.scoped_path(_facts_path(sid))

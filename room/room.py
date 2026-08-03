@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import time
 import traceback
 import threading
 from functools import wraps
@@ -383,6 +384,7 @@ def tick(
     user_id: str = "default",
     thread_id: str = "default",
     job_name: str | None = None,
+    lf_ctx: Any = None,
 ):
     """
     执行一个 Room Tick。
@@ -403,7 +405,8 @@ def tick(
         or ""
     )
     identity_token = runtime_context.set_identity(user_id, thread_id)
-    lf_ctx = LangfuseCtx(
+    if lf_ctx is None:
+        lf_ctx = LangfuseCtx(
         tick=0,
         user_id=user_id,
         thread_id=thread_id,
@@ -491,7 +494,29 @@ def tick(
             lf_ctx.beat_id = str(beat_info.get("current_beat_id", ""))
 
         # ── 故事线模式：DIRECT → ACT → RESOLVE ──
-        if _story_plan_active:
+        # __STORY_START__ 触发 narrator 开场（story 切换/重置后）
+        if user_message == "__STORY_START__":
+            result = _tick_story_start(
+                source=source, user_id=user_id, thread_id=thread_id, lf_ctx=lf_ctx
+            )
+            log_event(
+                lf_ctx,
+                "room.tick_exit",
+                output_data={
+                    "ok": result.get("ok"),
+                    "error": result.get("error"),
+                    "output_count": len(result.get("output") or []),
+                    "roles": [
+                        item.get("role")
+                        for item in (result.get("output") or [])
+                    ],
+                },
+            )
+            if not owns_trace:
+                lf_flush(lf_ctx)
+            tick_result = result
+            return tick_result
+        elif _story_plan_active:
             result = _tick_storyline(
                 state, user_message, source, lf_ctx=lf_ctx
             )
@@ -732,6 +757,97 @@ def _story_state_snapshot(ss_state: dict[str, Any], world_state: dict[str, Any])
         },
         "relationship": rel,
     }
+
+
+def _tick_story_start(
+    source: str = "cron",
+    user_id: str = "default",
+    thread_id: str = "default",
+    lf_ctx: Any = None,
+) -> dict[str, Any]:
+    """Story start hook: generate narrator opening for the current beat.
+
+    Triggered when a new story begins (switch or reset).
+    Skips director entirely, goes straight to narrator.
+    """
+    global _story_plan_active
+    _story_plan_active = True
+    import story_state as ss
+
+    ss_state = ss.load_state()
+    if ss_state.get("status") != "active":
+        return {"ok": True, "output": []}
+
+    bi = ss.get_current_beat_info(ss_state)
+    if bi.get("error"):
+        return {"ok": True, "output": []}
+
+    director.set_story_context(bi)
+
+    if lf_ctx is None:
+        lf_ctx = LangfuseCtx(
+            tick=0, user_id=user_id, thread_id=thread_id,
+            source=source, user_message="__STORY_START__",
+        )
+    # Don't call start_room_trace here - it's called by the caller (tick or photon_bridge)
+
+    narration_spec = {
+        "purpose": "scene_opening",
+        "timing": "before_dialogue",
+        "narration_type": "场景",
+        "visible_fact_ids": list(bi.get("allowed_information", [])),
+        "max_characters": 200,
+        "style_profile": "concise",
+        "brief": "故事开始，描述用户此刻看到的环境和氛围",
+        "scene_facts": [],
+    }
+
+    narration_events = _synthetic_confirmed_events_for_narration(narration_spec, bi)
+    request = contracts.NarrationRequest(
+        purpose=str(narration_spec.get("purpose", "visible_action")),
+        timing=str(narration_spec.get("timing", "after_dialogue")),
+        narration_type=str(narration_spec.get("narration_type", "旁白")),
+        visible_fact_ids=tuple(narration_spec.get("visible_fact_ids", [])),
+        max_characters=int(narration_spec.get("max_characters", 100)),
+        style_profile=str(narration_spec.get("style_profile", "concise")),
+        brief=str(narration_spec.get("brief", "")),
+        scene_facts=tuple(narration_spec.get("scene_facts", [])),
+    )
+
+    turn_id = f"story_start_{int(time.time())}"
+    room_ref = contracts.AgentRef(agent_id="room", kind=contracts.AgentKind.ROOM)
+    visible_facts = tuple(
+        contracts.FactRef(fact_id=fact_id, text=fact_id)
+        for fact_id in request.visible_fact_ids
+    )
+    narrator_input = contracts.NarratorInput(
+        narration_request=request,
+        scene=bi.get("scene", {}),
+        confirmed_events=tuple(narration_events),
+        visible_facts=visible_facts,
+    )
+    narrator_msg = contracts.new_message(
+        turn_id=turn_id,
+        story_id=str(bi.get("story_id", "story_1")),
+        beat_id=str(bi.get("current_beat_id", "")),
+        phase=contracts.Phase.NARRATE,
+        sender=room_ref,
+        recipient=contracts.AgentRef(
+            agent_id="narrator", kind=contracts.AgentKind.NARRATOR
+        ),
+        message_type="narrator.input",
+        correlation_id="",
+        payload=narrator_input,
+    )
+
+    narration_output = narrator.handle_message(narrator_msg)
+
+    outputs: list[dict[str, Any]] = []
+    draft = narration_output.payload
+    if draft.text.strip():
+        outputs.append({"role": "旁白", "text": draft.text.strip()})
+
+    return {"ok": True, "output": outputs}
 
 
 def _tick_storyline(state, user_message=None, source="cron", lf_ctx=None):

@@ -77,6 +77,19 @@ def handle_message(
     # ── 故事线选择命令 ───────────────────────────────
     story_cmd = story_selector.handle_command(user_message)
     if story_cmd is not None:
+        # story 命令成功后，触发 narrator 生成开场
+        if story_cmd.get("ok"):
+            tick_result = tick(
+                user_message="__STORY_START__",
+                source="system",
+                user_id=user_id,
+                thread_id=thread_id,
+                lf_ctx=lf_ctx,
+            )
+            # 合并系统消息 + narrator 开场
+            story_outputs = list(story_cmd.get("output") or [])
+            tick_outputs = list(tick_result.get("output") or [])
+            story_cmd["output"] = story_outputs + tick_outputs
         return story_cmd
 
     # # 前缀 = 提示请求：解析 #问题# 部分，剩余文本作为行动走 room.tick

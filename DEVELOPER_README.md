@@ -531,6 +531,119 @@ Director LLM 与 Guard 现在共用 canonical `DIRECTIVE_SCHEMA` / `RESOLUTION_S
 
 新代码不得继续依赖这些兼容接口。兼容逻辑只能存在于边界层，不能重新进入 Room 核心流程。
 
+## 19. 故事线选择器
+
+### 功能概述
+
+`room/story_selector.py` 提供三个命令，路由入口为 `handle_command(user_message)`：
+
+| 命令 | 函数 | 行为 |
+|---|---|---|
+| `/story_select` | `_do_select()` | 扫描 `contexts/story_plan_*.json`，列出所有可用 story |
+| `/story_X` | `_do_switch(story_id)` | 保存当前 story state，切换到目标 story |
+| `/story_reset` | `_do_reset()` | 重置当前 story 到起始 beat |
+
+`handle_command` 在 `room.tick()` 之前被调用，非 `/story*` 消息返回 `None`，正常走 `room.tick`。
+
+### 文件布局
+
+```
+contexts/
+  story_config.json          # current_story_id + available_stories（由 story_selector 维护）
+  story_1_plan.json          # story_1 故事计划
+  story_1_state.json         # story_1 进度状态
+  story_1_world.json         # story_1 世界状态
+  story_1_facts.json        # story_1 事实表
+  story_2_plan.json          # story_2 故事计划
+  ...
+```
+
+### switch_story 完整流程
+
+```python
+def switch_story(new_story_id):
+    # 1. 保存旧 story 进度
+    current_state = load_state()   # 读旧 story_state
+    save_state(current_state)      # 显式落盘
+
+    # 2. 切换全局 story id
+    _current_story_id = new_story_id
+
+    # 3. 加载新 story 的 plan + state
+    plan_path = _plan_path(new_story_id)
+    if os.path.exists(plan_path):
+        load_plan(plan_path)           # 重载 plan 到内存
+        loaded = load_state()           # 读新 story_state
+        if loaded.get("status") == "inactive":
+            new_state = activate_plan() # 从 m1 开始
+        else:
+            new_state = loaded           # 继续上次进度
+    else:
+        return {"ok": False, "error": "plan not found"}
+
+    # 4. 更新 story_config.json
+    _refresh_story_config()
+    return {"ok": True, "from": old, "to": new, "state": new_state}
+```
+
+**已在目标 story 时**（`switch_story` 判断 `old_sid == new_sid`）：直接返回当前状态，提示"已在当前故事线中，无需切换"，不做重复激活。
+
+### reset_current_story 完整流程
+
+```python
+def reset_current_story():
+    state = reset_state()          # 重置 story_state 到默认
+    new_state = activate_plan()     # 激活 plan，从 m1 开始
+
+    # 清空 world_state（scene / event_log / permissions）
+    import state_manager as sm
+    sm.save(sm.default_state())
+
+    # 清空当前 story 的 MEMORY.md
+    _clear_memory(_current_story_id)
+    return new_state
+```
+
+**注意**：`reset_state()` 只清 `story_state.json`，不清 `world_state.json` 和 `facts.json`——这两个由 `reset_current_story` 单独处理。
+
+### story_config.json 维护
+
+每次 `switch_story` 或 `_refresh_story_config()` 调用时更新：
+
+```json
+{
+  "current_story_id": "story_1",
+  "available_stories": [
+    {"story_id": "story_1", "theme": "（故事主题）"},
+    {"story_id": "story_2", "theme": "（故事主题）"}
+  ]
+}
+```
+
+`scan_stories()` 动态扫描 `contexts/story_plan_*.json`，不依赖配置文件中的 `available_stories` 列表——配置只用于持久化显示目的。
+
+### Langfuse 日志
+
+每个命令执行后都会记录 `story.command` 事件：
+
+```python
+log_event(ctx, "story.command", input_data={
+    "type": "story_switch",    # story_select | story_switch | story_reset
+    "from": "story_1",
+    "to": "story_2",
+    "result": "success"        # success | already_active | not_found
+}, level="DEFAULT")
+```
+
+### 涉及文件
+
+| 文件 | 改动 |
+|---|---|
+| `room/story_selector.py` | 新文件，命令路由与处理逻辑 |
+| `room/story_state.py` | `switch_story`/`reset_current_story`/`_refresh_story_config` |
+| `room/state_manager.py` | 已有 `CONTEXTS_DIR`，story_selector 直接复用 |
+| `contexts/story_config.json` | 新文件（或已有），由 story_selector 读写 |
+
 ## 18. 验证
 
 在项目根目录运行（Windows PowerShell）：

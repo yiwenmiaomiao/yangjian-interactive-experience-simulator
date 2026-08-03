@@ -303,7 +303,14 @@ def switch_story(new_story_id: str) -> dict[str, Any]:
     # 3. 加载或激活新 story
     plan_path = _plan_path(new_story_id)
     if os.path.exists(plan_path):
-        load_plan(plan_path)
+        try:
+            loaded_plan = load_plan(plan_path)
+            if loaded_plan is None:
+                _current_story_id = old_sid
+                return {"ok": False, "error": f"无法加载 {new_story_id} 的故事计划文件。"}
+        except Exception as e:
+            _current_story_id = old_sid
+            return {"ok": False, "error": f"故事计划解析失败：{e}"}
         loaded = load_state()
         if loaded.get("status") == "inactive":
             new_state = activate_plan()

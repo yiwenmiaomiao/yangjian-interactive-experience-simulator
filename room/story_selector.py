@@ -61,7 +61,7 @@ def save_config(cfg: dict[str, Any]):
 
 def handle_command(user_message: str) -> dict[str, Any] | None:
     """如果消息是 /story_* 命令，返回处理结果；否则返回 None 让 room.tick 继续处理。"""
-    msg = str(user_message).strip()
+    msg = str(user_message).strip().replace("\\story", "/story", 1)
     if not msg.startswith("/story"):
         return None
 
@@ -207,6 +207,7 @@ def _do_switch(story_id: str) -> dict[str, Any]:
         }, level="DEFAULT")
     except Exception:
         pass
+
     return {
         "ok": True,
         "type": "story_switch",
@@ -248,6 +249,7 @@ def _do_reset() -> dict[str, Any]:
         }, level="DEFAULT")
     except Exception:
         pass
+
     return {
         "ok": True,
         "type": "story_reset",

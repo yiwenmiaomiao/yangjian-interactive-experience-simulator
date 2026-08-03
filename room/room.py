@@ -2250,39 +2250,41 @@ def _capture_explicit_preferences(message: str, user_id: str) -> None:
 
 
 def _tick_free_chat(state, user_message=None, source="cron", lf_ctx=None):
-    """自由聊天模式：故事线已完成，不走 beat 推进，直接让杨戬回应用户。"""
+    """自由聊天模式：故事线已完成，不走 beat 推进，直接让杨戬回应用户。
+    铁律：不传任何故事线上下文（event_log / scene / beat_info）。
+    """
     outputs = []
     if user_message:
-        perception_text = state_manager.get_perception("yangjian", state, "")
+        # 关系是独立系统，可以保留；其余全部清空
+        rel_summary = ""
         try:
             import relationship as rel_mod
-            rel_summary = rel_mod.get_summary_for_yangjian()
-            if rel_summary:
-                perception_text = (
-                    perception_text + "\n\n" + rel_summary
-                ) if perception_text.strip() else rel_summary
+            rel_summary = rel_mod.get_summary_for_yangjian() or ""
         except Exception:
             pass
-        # 构建简化输入，不传 beat context
         from contracts import YangJianTurnInput, AgentTask, FactRef, AgentRef, AgentKind, Phase, new_message
+
         task = AgentTask(
             task_id="free_chat",
             target_agent_id="yangjian",
             objective="故事已完结，与用户自由聊天。保持杨戬人设。",
             source_reference="free_chat",
         )
-        public_history = tuple(contracts.published_history(state))
+        # 彻底清空故事线上下文
+        public_history: tuple = ()
+        perception: tuple = ()
+        if rel_summary:
+            perception = (FactRef(fact_id="free", text=rel_summary, visibility="private"),)
         turn_input = YangJianTurnInput(
             task=task,
-            scene=state.get("scene", {}),
+            scene={},
             public_room_history=public_history,
-            perception=tuple([FactRef(fact_id="free", text=perception_text, visibility="private")])
-            if perception_text.strip() else (),
+            perception=perception,
         )
         turn_id = f"turn_{state.get('tick', 0) + 1}"
         actor_request = new_message(
             turn_id=turn_id,
-            story_id="story_1",
+            story_id="free_chat",
             beat_id="free_chat",
             phase=Phase.ACT,
             sender=AgentRef(agent_id="room", kind=AgentKind.ROOM),
@@ -2291,7 +2293,7 @@ def _tick_free_chat(state, user_message=None, source="cron", lf_ctx=None):
             payload=turn_input,
         )
         try:
-            result = contracts.to_dict(yangjian.handle_message(actor_request).payload)
+            result = yangjian.act_turn(turn_input, minimal=True)
             proposal = result.get("proposal")
             if proposal:
                 action = proposal.get("action")

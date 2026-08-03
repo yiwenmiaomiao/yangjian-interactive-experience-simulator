@@ -78,90 +78,100 @@ def _summarize_history(messages: list, recent_count: int = 3) -> str:
     return f"[此前消息摘要：{summary}]\n" + "\n".join(recent)
 
 
-def _build_turn_prompt(turn_input: contracts.YangJianTurnInput) -> str:
-    lines = [
-        "## 本回合任务：",
-        turn_input.task.objective,
-    ]
-    if turn_input.task.success_condition.strip():
-        lines.append(f"成功条件：{turn_input.task.success_condition}")
-    
-    # 场景信息（从 beat plan 传入）
-    scene = turn_input.scene or {}
-    if scene:
-        scene_parts = []
-        if scene.get("location"):
-            scene_parts.append(f"当前地点：{scene['location']}")
-        if scene.get("time_of_day"):
-            scene_parts.append(f"时间：{scene['time_of_day']}")
-        if scene.get("weather"):
-            scene_parts.append(f"天气：{scene['weather']}")
-        if scene.get("mood"):
-            scene_parts.append(f"氛围：{scene['mood']}")
-        if scene_parts:
-            lines.append("")
-            lines.append("## 场景：")
-            for p in scene_parts:
-                lines.append(f"- {p}")
-    
-    if turn_input.perception:
-        lines.append("")
-        lines.append("## 额外感知：")
-        
-        date_str = ""
-        weather_str = ""
-        atmos_str = ""
-        events_str = ""
-        rel_str = ""
-        others = []
-        
-        for fact in turn_input.perception:
-            text = fact.text.strip()
-            if not text:
-                continue
-            
-            # 独立处理人物认知区块
-            if "对小仙汉的当前认知" in text:
-                rel_str = text if text.startswith("##") else f"## {text}"
-                continue
-                
-            # 去除可能自带的横杠，便于重新格式化
-            if text.startswith("- "):
-                text = text[2:]
-                
-            # 分类与格式化
-            if re.match(r"^第\d+天$", text):
-                date_str = f"- 日期：{text}"
-            elif text.startswith("天气："):
-                weather_str = f"- {text}"
-            elif text.startswith("氛围："):
-                atmos_str = f"- {text}"
-            elif text.startswith("最近事件："):
-                events_str = f"- 最近事件：\n{text[5:].strip()}"
-            else:
-                others.append(text)
-        
-        # 强制按照需要的顺序渲染
-        if date_str: lines.append(date_str)
-        if weather_str: lines.append(weather_str)
-        if atmos_str: lines.append(atmos_str)
-        if events_str: lines.append(events_str)
-        
-        for o in others:
-            if "\n" in o:
-                lines.append(o)
-            else:
-                lines.append(f"- {o}")
-                
-        # 认知状态放在最后
-        if rel_str:
-            lines.append("")
-            lines.append(rel_str)
+def _build_turn_prompt(turn_input: contracts.YangJianTurnInput, *, minimal: bool = False) -> str:
+    lines = []
+    if not minimal:
+        lines.extend([
+            "## 本回合任务：",
+            turn_input.task.objective,
+        ])
+        if turn_input.task.success_condition.strip():
+            lines.append(f"成功条件：{turn_input.task.success_condition}")
 
-    lines.append("")
-    lines.append("## 公开消息：")
-    history = list(turn_input.public_room_history)
-    lines.append(_summarize_history(history))
+        # 场景信息（从 beat plan 传入）
+        scene = turn_input.scene or {}
+        if scene:
+            scene_parts = []
+            if scene.get("location"):
+                scene_parts.append(f"当前地点：{scene['location']}")
+            if scene.get("time_of_day"):
+                scene_parts.append(f"时间：{scene['time_of_day']}")
+            if scene.get("weather"):
+                scene_parts.append(f"天气：{scene['weather']}")
+            if scene.get("mood"):
+                scene_parts.append(f"氛围：{scene['mood']}")
+            if scene_parts:
+                lines.append("")
+                lines.append("## 场景：")
+                for p in scene_parts:
+                    lines.append(f"- {p}")
+
+        if turn_input.perception:
+            lines.append("")
+            lines.append("## 额外感知：")
+
+            date_str = ""
+            weather_str = ""
+            atmos_str = ""
+            events_str = ""
+            rel_str = ""
+            others = []
+
+            for fact in turn_input.perception:
+                text = fact.text.strip()
+                if not text:
+                    continue
+
+                # 独立处理人物认知区块
+                if "对小仙汉的当前认知" in text:
+                    rel_str = text if text.startswith("##") else f"## {text}"
+                    continue
+
+                # 去除可能自带的横杠，便于重新格式化
+                if text.startswith("- "):
+                    text = text[2:]
+
+                # 分类与格式化
+                if re.match(r"^\d+$", text):
+                    pass
+                elif text.startswith("天气："):
+                    weather_str = f"- {text}"
+                elif text.startswith("氛围："):
+                    atmos_str = f"- {text}"
+                elif text.startswith("最近事件："):
+                    events_str = f"- 最近事件：\n{text[5:].strip()}"
+                else:
+                    others.append(text)
+
+            # 强制按照需要的顺序渲染
+            if date_str: lines.append(date_str)
+            if weather_str: lines.append(weather_str)
+            if atmos_str: lines.append(atmos_str)
+            if events_str: lines.append(events_str)
+
+            for o in others:
+                if "\n" in o:
+                    lines.append(o)
+                else:
+                    lines.append(f"- {o}")
+
+            # 认知状态放在最后
+            if rel_str:
+                lines.append("")
+                lines.append(rel_str)
+
+        lines.append("")
+        lines.append("## 公开消息：")
+        history = list(turn_input.public_room_history)
+        lines.append(_summarize_history(history))
+    else:
+        # 自由聊天模式：perception 里只有 relationship summary，不注入任务/scene/历史
+        if turn_input.perception:
+            for fact in turn_input.perception:
+                text = fact.text.strip()
+                if text:
+                    lines.append(text)
+
     return "\n".join(lines)
 
 
@@ -187,8 +197,10 @@ INPUT_TEMPLATE = """{soul}
 """
 
 
-def act_turn(turn_input: contracts.YangJianTurnInput) -> dict:
-    """Structured Yang Jian runtime entry point."""
+def act_turn(turn_input: contracts.YangJianTurnInput, *, minimal: bool = False) -> dict:
+    """Structured Yang Jian runtime entry point.
+    If minimal=True, skips all story-mode context (task/scene/history) in the prompt.
+    """
     try:
         data = call_structured(
             ActorTurnOutput,
@@ -196,7 +208,7 @@ def act_turn(turn_input: contracts.YangJianTurnInput) -> dict:
             system=_load_soul(),
             messages=[{
                 "role": "user",
-                "content": _build_turn_prompt(turn_input),
+                "content": _build_turn_prompt(turn_input, minimal=minimal),
             }],
             temperature=0.6,
             max_tokens=4000,

@@ -12,11 +12,70 @@ import os
 import json
 import time
 import traceback
+from datetime import datetime
+from pathlib import Path
 from contextlib import contextmanager
 from typing import Any
 
 _LF = None
 _ENABLED = True
+
+# 本地文件日志
+_LOCAL_LOG_DIR = Path(__file__).parent.parent / "logs" / "langfuse"
+_LOCAL_LOG_ENABLED = os.environ.get("LANGFUSE_LOCAL_LOG", "1") == "1"
+
+
+def _ensure_log_dir():
+    if _LOCAL_LOG_ENABLED:
+        _LOCAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _write_local_log(event_type: str, data: dict):
+    if not _LOCAL_LOG_ENABLED:
+        return
+    try:
+        _ensure_log_dir()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"{event_type}_{ts}.json"
+        filepath = _LOCAL_LOG_DIR / filename
+        filepath.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+def _log_local(ctx: LangfuseCtx, event_type: str, data: dict):
+    if not _ENABLED:
+        return
+    lf = _get_client()
+    if lf is None:
+        return
+    try:
+        data = {
+            "timestamp": datetime.now().isoformat(),
+            "session_id": ctx.session_id,
+            "user_id": ctx.user_id,
+            "trace_name": ctx.trace_name,
+            "event_type": event_type,
+            **data,
+        }
+        _write_local_log(event_type, data)
+    except Exception:
+        pass
+
+
+
+def flush(ctx: LangfuseCtx | None = None):
+    if not _ENABLED:
+        return
+    lf = _get_client()
+    if lf:
+        try:
+            lf.flush()
+        except Exception:
+            pass
+
 
 
 def _read_env(key: str) -> str:
@@ -387,6 +446,14 @@ def log_event(
     lf = _get_client()
     if lf is None:
         return
+
+    # 本地文件日志
+    _log_local(ctx, name, {
+        "level": level,
+        "input": input_data,
+        "output": output_data,
+        "metadata": ctx.base_metadata(),
+    })
     try:
         from langfuse import propagate_attributes
 
@@ -497,6 +564,15 @@ def log_generation(
         if metadata:
             meta.update(metadata)
         level = "ERROR" if meta.get("empty_content") else "DEFAULT"
+
+        # 本地文件日志
+        _log_local(ctx, f"generation:{agent_id}", {
+            "input_len": len(inp),
+            "output_len": len(output or ""),
+            "duration_ms": duration_ms,
+            "level": level,
+            "meta": meta,
+        })
         out = _truncate(output) if (output or "").strip() else {
             "status": "empty_content",
             "finish_reason": meta.get("finish_reason"),
@@ -533,13 +609,3 @@ def log_state_change(
     """状态变更：精简后静默跳过，state_changes 已在 room.resolution 里记录。"""
     return
 
-
-def flush(ctx: LangfuseCtx | None = None):
-    if not _ENABLED:
-        return
-    lf = _get_client()
-    if lf:
-        try:
-            lf.flush()
-        except Exception:
-            pass

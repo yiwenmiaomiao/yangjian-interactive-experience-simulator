@@ -289,6 +289,9 @@ def handle_resolve(
     raw_results = [
         contracts.to_dict(item) for item in message.payload.actor_results
     ]
+    # 将 recovery_goal 注入 _CACHED_BEAT_INFO，让 resolve prompt 能看到
+    if _CACHED_BEAT_INFO is not None and message.payload.recovery_goal:
+        _CACHED_BEAT_INFO["recovery_sub_goal"] = message.payload.recovery_goal
     raw = decide_resolve(
         dict(message.payload.world_snapshot),
         raw_results,
@@ -665,6 +668,7 @@ def _resolve_story(
         "- next_beat 只能填已解锁的 beat ID，否则 null\n"
         f"- next_beat：如果当前 beat 满足某个 transition 的 goal，填写该 transition 的 target_id。未满足则填 null。\n"
         f"- sub_goal_met：仅在 recovery 弧中填写。recovery 子目标：{bi.get('recovery_sub_goal', '非recovery弧')}。非 recovery 弧填 false。\n"
+        f"- 当前 beat 目标（beat_goal）：{bi.get('beat_goal', '未设定')}。\n"
         "- continuation 必填；Director 没有 hold 或停止选项\n"
     )
 

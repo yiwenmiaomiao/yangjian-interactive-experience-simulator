@@ -61,3 +61,6 @@ SOUL.md
 agents/
 npc_contexts/
 stories/
+
+# ── Langfuse 本地日志 ──────────────────────────────
+logs/

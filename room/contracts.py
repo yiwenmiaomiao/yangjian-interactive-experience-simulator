@@ -407,6 +407,7 @@ class DirectorResolveInput:
     user_turn: Mapping[str, Any] = field(default_factory=dict)
     unlocked_transitions: tuple[Mapping[str, Any], ...] = ()
     allowed_state_operations: tuple[str, ...] = ()
+    recovery_goal: str = ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

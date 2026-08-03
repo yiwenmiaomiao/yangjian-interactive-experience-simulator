@@ -1131,219 +1131,212 @@ def _tick_storyline(state, user_message=None, source="cron", lf_ctx=None):
     # ═══ Phase 2b: Actor Pool 行动 ═══
     # Narrator 不在此对象池中。
     actor_results: list[dict[str, Any]] = []
-    if act_required:
-        with room_phase(
-            lf_ctx,
-            "room.phase2_act",
-            input_data={
-                "act_required": act_required,
-                "task_count": len(directive.get("actor_tasks", [])),
-            },
-        ):
-            for raw_task in directive.get("actor_tasks", []):
-                if not isinstance(raw_task, dict):
-                    continue
-                target = str(raw_task.get("target_agent_id", ""))
-                visible_facts = tuple(
-                    contracts.FactRef(
-                        fact_id=str(
-                            info.get("fact_id", info)
-                            if isinstance(info, dict)
-                            else info
-                        ),
-                        text=str(
-                            info.get("text", info)
-                            if isinstance(info, dict)
-                            else info
-                        ),
-                        visibility=str(
-                            info.get("visibility", "public")
-                            if isinstance(info, dict)
-                            else "public"
-                        ),
-                    )
-                    for info in raw_task.get(
-                        "visible_facts", raw_task.get("information_ids", [])
-                    )
+    _tasks = directive.get("actor_tasks", [])
+    with room_phase(
+        lf_ctx,
+        "room.phase2_act",
+        input_data={
+            "act_required": act_required,
+            "task_count": len(directive.get("actor_tasks", [])),
+        },
+    ):
+        for raw_task in directive.get("actor_tasks", []):
+            if not isinstance(raw_task, dict):
+                continue
+            target = str(raw_task.get("target_agent_id", ""))
+            visible_facts = tuple(
+                contracts.FactRef(
+                    fact_id=str(
+                        info.get("fact_id", info)
+                        if isinstance(info, dict)
+                        else info
+                    ),
+                    text=str(
+                        info.get("text", info)
+                        if isinstance(info, dict)
+                        else info
+                    ),
+                    visibility=str(
+                        info.get("visibility", "public")
+                        if isinstance(info, dict)
+                        else "public"
+                    ),
                 )
-                try:
-                    task = contracts.AgentTask(
-                        task_id=str(raw_task.get("task_id", "")),
-                        target_agent_id=target,
-                        objective=str(raw_task.get("objective", "")),
-                        source_reference=str(
-                            raw_task.get("source_reference")
-                            or bi.get("current_beat_id", "")
-                        ),
-                        visible_facts=visible_facts,
-                        allowed_actions=tuple(
-                            raw_task.get("allowed_actions", ("speak", "act"))
-                        ),
-                        constraints=tuple(raw_task.get("constraints", ())),
-                        success_condition=str(
-                            raw_task.get(
-                                "success_condition",
-                                "产生符合角色的行动或明确不行动原因",
-                            )
-                        ),
-                    )
-                except ValueError as exc:
-                    log_event(
-                        lf_ctx,
-                        "room.actor_task_invalid",
-                        input_data=raw_task,
-                        output_data={"error": str(exc)},
-                        level="WARNING",
-                    )
-                    continue
+                for info in raw_task.get(
+                    "visible_facts", raw_task.get("information_ids", [])
+                )
+            )
+            try:
+                task = contracts.AgentTask(
+                    task_id=str(raw_task.get("task_id", "")),
+                    target_agent_id=target,
+                    objective=str(raw_task.get("objective", "")),
+                    source_reference=str(
+                        raw_task.get("source_reference")
+                        or bi.get("current_beat_id", "")
+                    ),
+                    visible_facts=visible_facts,
+                    allowed_actions=tuple(
+                        raw_task.get("allowed_actions", ("speak", "act"))
+                    ),
+                    constraints=tuple(raw_task.get("constraints", ())),
+                    success_condition=str(
+                        raw_task.get(
+                            "success_condition",
+                            "产生符合角色的行动或明确不行动原因",
+                        )
+                    ),
+                )
+            except ValueError as exc:
                 log_event(
                     lf_ctx,
-                    "room.actor_task_start",
-                    input_data={
-                        "target": target,
-                        "task_id": task.task_id,
-                        "objective": task.objective,
-                    },
+                    "room.actor_task_invalid",
+                    input_data=raw_task,
+                    output_data={"error": str(exc)},
+                    level="WARNING",
                 )
-                try:
-                    if is_yangjian(target):
-                        perception_text = state_manager.get_perception(
-                            "yangjian", state, ""
+                continue
+            log_event(
+                lf_ctx,
+                "room.actor_task_start",
+                input_data={
+                    "target": target,
+                    "task_id": task.task_id,
+                    "objective": task.objective,
+                },
+            )
+            try:
+                if is_yangjian(target):
+                    perception_text = state_manager.get_perception(
+                        "yangjian", state, ""
+                    )
+                    # Inject relationship summary so yangjian knows
+                    # how he feels about the user.
+                    try:
+                        import relationship as rel_mod
+                        rel_summary = rel_mod.get_summary_for_yangjian()
+                        if rel_summary:
+                            perception_text = (
+                                perception_text + "\n\n" + rel_summary
+                            ) if perception_text.strip() else rel_summary
+                    except Exception:
+                        pass
+                    # Inject checkpoint description if this beat has one
+                    # (RelationshipCheckpoint dataclass OR plain dict)
+                    checkpoint = bi.get("relationship_checkpoint")
+                    if checkpoint:
+                        checkpoint_desc = (
+                            checkpoint.get("description", "")
+                            if isinstance(checkpoint, dict)
+                            else getattr(checkpoint, "description", "")
                         )
-                        # Inject relationship summary so yangjian knows
-                        # how he feels about the user.
-                        try:
-                            import relationship as rel_mod
-                            rel_summary = rel_mod.get_summary_for_yangjian()
-                            if rel_summary:
-                                perception_text = (
-                                    perception_text + "\n\n" + rel_summary
-                                ) if perception_text.strip() else rel_summary
-                        except Exception:
-                            pass
-                        # Inject checkpoint description if this beat has one
-                        # (RelationshipCheckpoint dataclass OR plain dict)
-                        checkpoint = bi.get("relationship_checkpoint")
-                        if checkpoint:
-                            checkpoint_desc = (
-                                checkpoint.get("description", "")
-                                if isinstance(checkpoint, dict)
-                                else getattr(checkpoint, "description", "")
-                            )
-                            perception_text += (
-                                "\n\n## 本回合关系评估点\n"
-                                f"{checkpoint_desc}\n"
-                                "请在 relationship_feedback 中输出你对用户本回合行为的感受变化"
-                                "（没有变化也填，changes 留空即可）"
-                            )
-                        perception = tuple(
-                            (
-                                contracts.FactRef(
-                                    fact_id="room_perception",
-                                    text=perception_text,
-                                    visibility="private",
-                                ),
-                                *visible_facts,
-                            )
-                            if perception_text.strip()
-                            else visible_facts
+                        perception_text += (
+                            "\n\n## 本回合关系评估点\n"
+                            f"{checkpoint_desc}\n"
+                            "请在 relationship_feedback 中输出你对用户本回合行为的感受变化"
+                            "（没有变化也填，changes 留空即可）"
                         )
-                        actor_ref = contracts.AgentRef(
-                            agent_id="yangjian", kind=contracts.AgentKind.ACTOR
-                        )
-                        actor_request = contracts.new_message(
-                            turn_id=turn_id,
-                            story_id=str(bi.get("story_id", "story_1")),
-                            beat_id=str(bi.get("current_beat_id", "")),
-                            phase=contracts.Phase.ACT,
-                            sender=room_ref,
-                            recipient=actor_ref,
-                            message_type="yangjian.turn.input",
-                            correlation_id=direct_response.message_id,
-                            payload=contracts.YangJianTurnInput(
-                                task=task,
-                                scene=bi.get("scene", {}),
-                                public_room_history=public_history_tuple,
-                                perception=perception,
+                    perception = tuple(
+                        (
+                            contracts.FactRef(
+                                fact_id="room_perception",
+                                text=perception_text,
+                                visibility="private",
                             ),
+                            *visible_facts,
                         )
-                        result = contracts.to_dict(
-                            yangjian.handle_message(actor_request).payload
-                        )
-                        # Process relationship feedback from yangjian
-                        # (only present on checkpoint beats)
-                        feedback = result.get("relationship_feedback")
-                        if isinstance(feedback, dict):
-                            changes = feedback.get("changes", {})
-                            reason = str(feedback.get("reason", ""))
-                            if changes and isinstance(changes, dict):
-                                try:
-                                    import relationship as rel_mod
-                                    rel_mod.apply_delta(
-                                        changes,
-                                        beat_id=str(bi.get("current_beat_id", "")),
-                                        reason=reason,
-                                    )
-                                    log_event(
-                                        lf_ctx,
-                                        "room.relationship_update",
-                                        output_data={
-                                            "changes": changes,
-                                            "reason": reason[:200],
-                                            "beat_id": bi.get("current_beat_id"),
-                                        },
-                                    )
-                                except Exception:
-                                    pass
-                    else:
-                        turn_input = npc.build_structured_turn_input(
-                            target,
+                        if perception_text.strip()
+                        else visible_facts
+                    )
+                    actor_ref = contracts.AgentRef(
+                        agent_id="yangjian", kind=contracts.AgentKind.ACTOR
+                    )
+                    actor_request = contracts.new_message(
+                        turn_id=turn_id,
+                        story_id=str(bi.get("story_id", "story_1")),
+                        beat_id=str(bi.get("current_beat_id", "")),
+                        phase=contracts.Phase.ACT,
+                        sender=room_ref,
+                        recipient=actor_ref,
+                        message_type="yangjian.turn.input",
+                        correlation_id=direct_response.message_id,
+                        payload=contracts.YangJianTurnInput(
                             task=task,
                             scene=bi.get("scene", {}),
                             public_room_history=public_history_tuple,
-                            perception=visible_facts,
-                        )
-                        actor_request = contracts.new_message(
-                            turn_id=turn_id,
-                            story_id=str(bi.get("story_id", "story_1")),
-                            beat_id=str(bi.get("current_beat_id", "")),
-                            phase=contracts.Phase.ACT,
-                            sender=room_ref,
-                            recipient=contracts.AgentRef(
-                                agent_id=target, kind=contracts.AgentKind.ACTOR
-                            ),
-                            message_type="npc.turn.input",
-                            correlation_id=direct_response.message_id,
-                            payload=turn_input,
-                        )
-                        result = contracts.to_dict(
-                            npc.handle_agent_message(actor_request).payload
-                        )
-                except Exception as exc:
-                    log_error(
-                        lf_ctx,
-                        "room.actor_exception",
-                        exc,
-                        input_data={"target": target, "task_id": task.task_id},
+                            perception=perception,
+                        ),
                     )
-                    raise
-                log_event(
+                    result = contracts.to_dict(
+                        yangjian.handle_message(actor_request).payload
+                    )
+                    # Process relationship feedback from yangjian
+                    # (only present on checkpoint beats)
+                    feedback = result.get("relationship_feedback")
+                    if isinstance(feedback, dict):
+                        changes = feedback.get("changes", {})
+                        reason = str(feedback.get("reason", ""))
+                        if changes and isinstance(changes, dict):
+                            try:
+                                import relationship as rel_mod
+                                rel_mod.apply_delta(
+                                    changes,
+                                    beat_id=str(bi.get("current_beat_id", "")),
+                                    reason=reason,
+                                )
+                                log_event(
+                                    lf_ctx,
+                                    "room.relationship_update",
+                                    output_data={
+                                        "changes": changes,
+                                        "reason": reason[:200],
+                                        "beat_id": bi.get("current_beat_id"),
+                                    },
+                                )
+                            except Exception:
+                                pass
+                else:
+                    turn_input = npc.build_structured_turn_input(
+                        target,
+                        task=task,
+                        scene=bi.get("scene", {}),
+                        public_room_history=public_history_tuple,
+                        perception=visible_facts,
+                    )
+                    actor_request = contracts.new_message(
+                        turn_id=turn_id,
+                        story_id=str(bi.get("story_id", "story_1")),
+                        beat_id=str(bi.get("current_beat_id", "")),
+                        phase=contracts.Phase.ACT,
+                        sender=room_ref,
+                        recipient=contracts.AgentRef(
+                            agent_id=target, kind=contracts.AgentKind.ACTOR
+                        ),
+                        message_type="npc.turn.input",
+                        correlation_id=direct_response.message_id,
+                        payload=turn_input,
+                    )
+                    result = contracts.to_dict(
+                        npc.handle_agent_message(actor_request).payload
+                    )
+            except Exception as exc:
+                log_error(
                     lf_ctx,
-                    "room.actor_task_done",
-                    output_data={
-                        "target": target,
-                        "kind": result.get("kind"),
-                        "result_id": result.get("result_id"),
-                    },
+                    "room.actor_exception",
+                    exc,
+                    input_data={"target": target, "task_id": task.task_id},
                 )
-                actor_results.append(result)
-    else:
-        log_event(
-            lf_ctx,
-            "room.phase2_act_skipped",
-            output_data={"reason": resolve_gate.get("reason")},
-        )
-
+                raise
+            log_event(
+                lf_ctx,
+                "room.actor_task_done",
+                output_data={
+                    "target": target,
+                    "kind": result.get("kind"),
+                    "result_id": result.get("result_id"),
+                },
+            )
+            actor_results.append(result)
     log_event(
         lf_ctx,
         "room.resolve_gate",
@@ -1354,7 +1347,6 @@ def _tick_storyline(state, user_message=None, source="cron", lf_ctx=None):
             "reason": resolve_gate.get("reason"),
         },
     )
-    # Flush so Langfuse shows the gate even while RESOLVE LLM is still running.
     lf_flush(lf_ctx)
 
     forbidden_fragments = list(bi.get("forbidden_information", []))
@@ -1430,6 +1422,7 @@ def _tick_storyline(state, user_message=None, source="cron", lf_ctx=None):
                             "set_character_state",
                             "advance_beat",
                         ),
+                        recovery_goal=str(bi.get("recovery_sub_goal", "")),
                     ),
                 )
                 log_event(

@@ -95,6 +95,12 @@ def _transition(data: Mapping[str, Any]) -> BranchTransition:
 
 
 def _beat(data: Mapping[str, Any]) -> StoryBeat:
+    # 校验场景状态字段必须非空
+    for field in ("world_day", "time_of_day", "weather", "location", "mood"):
+        value = str(data.get(field, ""))
+        if not value.strip():
+            raise ValueError(f"StoryBeat '{data.get('beat_id', '?')}' field '{field}' must not be blank")
+
     checkpoint_data = data.get("relationship_checkpoint")
     checkpoint = None
     if isinstance(checkpoint_data, Mapping) and checkpoint_data.get("description"):

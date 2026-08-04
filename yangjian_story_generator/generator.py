@@ -163,6 +163,13 @@ def _build_payload(
             "no_prebuilt_dialogue": True,
             "preserve_branch_consequences_after_reconvergence": True,
             "private_output": True,
+            "scene_fields_required": [
+                "world_day",
+                "time_of_day",
+                "weather",
+                "location",
+                "mood",
+            ],
         },
         "brief": asdict(brief),
         "character_context": asdict(character),

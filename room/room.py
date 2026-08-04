@@ -1683,11 +1683,12 @@ def _tick_storyline(state, user_message=None, source="cron", lf_ctx=None):
 
     # Phase 4: Room 保存 + 事实管理
     state["tick"] = state.get("tick", 0) + 1
+    current_tick = str(state["tick"])
     if user_message:
         state.setdefault("event_log", []).append(f"[tick{state['tick']}] 用户: {user_message[:120]}")
         contracts.append_published_message(
             state,
-            turn_id=turn_id,
+            turn_id=current_tick,
             role="用户",
             kind="dialogue",
             text=user_message,
@@ -1697,7 +1698,7 @@ def _tick_storyline(state, user_message=None, source="cron", lf_ctx=None):
             state.setdefault("event_log", []).append(f"[tick{state['tick']}] {o['role']}: {o['text'][:200]}")
             contracts.append_published_message(
                 state,
-                turn_id=turn_id,
+                turn_id=current_tick,
                 role=o["role"],
                 kind=o.get("kind", "dialogue"),
                 text=o["text"],

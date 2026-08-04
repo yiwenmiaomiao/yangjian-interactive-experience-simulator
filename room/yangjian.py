@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os, json, re
 from typing import Any
+from jinja2 import Template
 import llm
 if __package__:
     from . import contracts
@@ -22,7 +23,30 @@ PROJECT_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
     "YANGJIAN_PROJECT_DIR",
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 )))
-SOUL_PATH = os.path.join(PROJECT_DIR, "SOUL.md")
+
+PROMPTS_DIR = os.path.join(PROJECT_DIR, "prompts", "agents")
+_TEMPLATES_DIR = os.path.join(PROJECT_DIR, "prompts", "_templates")
+_SOUL_TPL: str | None = None
+_TURN_TPL: str | None = None
+
+
+def _load_soul() -> str:
+    """加载杨戬人设（从 prompts/agents/yangjian.md 读取）"""
+    global _SOUL_TPL
+    if _SOUL_TPL is None:
+        with open(os.path.join(PROMPTS_DIR, "yangjian.md"), "r", encoding="utf-8") as f:
+            _SOUL_TPL = f.read()
+    return _SOUL_TPL
+
+
+def _load_turn_tpl() -> str:
+    """加载 turn 输入 Jinja2 模板（从 prompts/_templates/yangjian-turn.md 读取）"""
+    global _TURN_TPL
+    if _TURN_TPL is None:
+        with open(os.path.join(_TEMPLATES_DIR, "yangjian-turn.md"), "r", encoding="utf-8") as f:
+            _TURN_TPL = f.read()
+    return _TURN_TPL
+
 
 # Per-story MEMORY.md 路径
 def _get_memory_path():
@@ -34,24 +58,6 @@ def _get_memory_path():
         return os.path.join(d, "MEMORY.md")
     except Exception:
         return os.path.join(PROJECT_DIR, "memories", "MEMORY.md")
-
-
-def _load_soul():
-    """加载杨戬人设"""
-    with open(SOUL_PATH, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-def _load_memory():
-    """加载杨戬当前感知记忆（per-story）"""
-    path = _get_memory_path()
-    if not os.path.exists(path):
-        return "无近期记忆"
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-SYSTEM_PROMPT_HEAD = """你是杨戬，二郎显圣真君。"""
 
 
 def _format_public_message(message: Any) -> str:
@@ -69,148 +75,87 @@ def _format_public_message(message: Any) -> str:
     return f"{role}：{text}"
 
 
-def _summarize_history(messages: list, recent_count: int = 3) -> str:
-    """精简公开消息：最近 N 条原文 + 之前的摘要。"""
+def _summarize_history(messages: list, recent_ticks: int = 3) -> str:
+    """精简公开消息：最近 N 个 tick 原文 + 之前所有 tick 的 LLM 摘要。"""
     formatted = []
     for message in messages:
         line = _format_public_message(message)
         if line:
-            formatted.append(line)
-    if len(formatted) <= recent_count:
-        return "\n".join(formatted) if formatted else "（暂无）"
-    recent = formatted[-recent_count:]
-    older = formatted[:-recent_count]
-    # 摘要：只保留角色名和消息数
-    role_counts = {}
-    for line in older:
-        role = line.split("：")[0] if "：" in line else "未知"
-        role_counts[role] = role_counts.get(role, 0) + 1
-    summary = "、".join(f"{r}{c}条" for r, c in role_counts.items())
-    return f"[此前消息摘要：{summary}]\n" + "\n".join(recent)
+            formatted.append((message, line))
+
+    if not formatted:
+        return "（暂无）"
+
+    # 按 turn_id 分 tick（每个 tick 可能有多条消息）
+    from collections import OrderedDict
+    ticks: list[list[str]] = []
+    tick_map: OrderedDict[str, list[str]] = OrderedDict()
+    for _, line in formatted:
+        turn_id = getattr(_, "turn_id", "") or "unknown"
+        if turn_id not in tick_map:
+            tick_map[turn_id] = []
+        tick_map[turn_id].append(line)
+    tick_groups = list(tick_map.values())
+
+    if len(tick_groups) <= recent_ticks:
+        return "\n".join(line for group in tick_groups for line in group)
+
+    recent = tick_groups[-recent_ticks:]
+    older = tick_groups[:-recent_ticks]
+
+    # older tick 合并后 LLM 摘要
+    older_text = "\n".join(
+        f"[Tick {i+1}]\n" + "\n".join(group)
+        for i, group in enumerate(older)
+    )
+    summary_prompt = (
+        "以下是更早的公开消息，请用1-2句话总结发生了什么（不要列举消息数量或 tick 数量）：\n"
+        + older_text
+    )
+    try:
+        summary = llm.call(
+            agent_id="yangjian",
+            system="你是消息总结助手。",
+            messages=[{"role": "user", "content": summary_prompt}],
+            temperature=0.3,
+            max_tokens=200,
+            model=os.environ.get("YANGJIAN_ACTOR_LLM_MODEL") or None,
+        )
+        summary = summary.strip() if summary else ""
+    except Exception:
+        raise
+
+    parts = []
+    if summary:
+        parts.append(f"[前述摘要]{summary}")
+    for group in recent:
+        parts.extend(group)
+    return "\n".join(parts)
 
 
 def _build_turn_prompt(turn_input: contracts.YangJianTurnInput, *, minimal: bool = False) -> str:
-    lines = []
-    if not minimal:
-        lines.extend([
-            "## 本回合任务：",
-            turn_input.task.objective,
-        ])
-        if turn_input.task.beat_action_brief.strip():
-            lines.extend([
-                "",
-                f"【本 Beat 核心行动目标】：{turn_input.task.beat_action_brief}",
-            ])
-        if turn_input.task.success_condition.strip():
-            lines.append(f"成功条件：{turn_input.task.success_condition}")
+    """用 Jinja2 模板渲染 turn 输入。"""
+    tpl_str = _load_turn_tpl()
+    if not tpl_str:
+        return ""
+    tpl = Template(tpl_str, keep_trailing_newline=True)
 
-        # 场景信息（从 beat plan 传入）
-        scene = turn_input.scene or {}
-        if scene:
-            scene_parts = []
-            if scene.get("location"):
-                scene_parts.append(f"当前地点：{scene['location']}")
-            if scene.get("time_of_day"):
-                scene_parts.append(f"时间：{scene['time_of_day']}")
-            if scene.get("weather"):
-                scene_parts.append(f"天气：{scene['weather']}")
-            if scene.get("mood"):
-                scene_parts.append(f"氛围：{scene['mood']}")
-            if scene_parts:
-                lines.append("")
-                lines.append("## 场景：")
-                for p in scene_parts:
-                    lines.append(f"- {p}")
+    scene = turn_input.scene or {}
+    history_summary = _summarize_history(list(turn_input.public_room_history))
 
-        if turn_input.perception:
-            lines.append("")
-            lines.append("## 额外感知：")
-
-            date_str = ""
-            weather_str = ""
-            atmos_str = ""
-            events_str = ""
-            rel_str = ""
-            others = []
-
-            for fact in turn_input.perception:
-                text = fact.text.strip()
-                if not text:
-                    continue
-
-                # 独立处理人物认知区块
-                if "对小仙汉的当前认知" in text:
-                    rel_str = text if text.startswith("##") else f"## {text}"
-                    continue
-
-                # 去除可能自带的横杠，便于重新格式化
-                if text.startswith("- "):
-                    text = text[2:]
-
-                # 分类与格式化
-                if re.match(r"^\d+$", text):
-                    pass
-                elif text.startswith("天气："):
-                    weather_str = f"- {text}"
-                elif text.startswith("氛围："):
-                    atmos_str = f"- {text}"
-                elif text.startswith("最近事件："):
-                    events_str = f"- 最近事件：\n{text[5:].strip()}"
-                else:
-                    others.append(text)
-
-            # 强制按照需要的顺序渲染
-            if date_str: lines.append(date_str)
-            if weather_str: lines.append(weather_str)
-            if atmos_str: lines.append(atmos_str)
-            if events_str: lines.append(events_str)
-
-            for o in others:
-                if "\n" in o:
-                    lines.append(o)
-                else:
-                    lines.append(f"- {o}")
-
-            # 认知状态放在最后
-            if rel_str:
-                lines.append("")
-                lines.append(rel_str)
-
-        lines.append("")
-        lines.append("## 公开消息：")
-        history = list(turn_input.public_room_history)
-        lines.append(_summarize_history(history))
-    else:
-        # 自由聊天模式：perception 里只有 relationship summary，不注入任务/scene/历史
-        if turn_input.perception:
-            for fact in turn_input.perception:
-                text = fact.text.strip()
-                if text:
-                    lines.append(text)
-
-    return "\n".join(lines)
-
-
-INPUT_TEMPLATE = """{soul}
-
-## 你当前的感知
-
-{perception}
-
-## 发生的事
-
-{event_context}
-
-## 你本阶段的目标
-
-{my_goal}
-
-## 输出规则
-- 如果你有动作，必须以「动作内容」的格式输出
-- 如果你说话，直接输出对话
-- 动作和对话必须分成不同的输出段
-- 你的话很少。不是每件事都值得回应
-"""
+    return tpl.render(
+        minimal=minimal,
+        objective=turn_input.task.objective or "",
+        beat_action_brief=turn_input.task.beat_action_brief or "",
+        success_condition=turn_input.task.success_condition or "",
+        scene={
+            "location": scene.get("location") or "",
+            "time_of_day": scene.get("time_of_day") or "",
+            "weather": scene.get("weather") or "",
+            "mood": scene.get("mood") or "",
+        },
+        history_summary=history_summary,
+    )
 
 
 def act_turn(turn_input: contracts.YangJianTurnInput, *, minimal: bool = False) -> dict:
@@ -363,22 +308,44 @@ def handle_message(
     )
 
 
+# ── Legacy act() path (still used by room.py) ─────────────────────────────────
+
+INPUT_TEMPLATE = """{soul}
+
+## 你当前的感知
+
+{perception}
+
+## 发生的事
+
+{event_context}
+
+## 你本阶段的目标
+
+{my_goal}
+
+## 输出规则
+- 如果你有动作，必须以「动作内容」的格式输出
+- 如果你说话，直接输出对话
+- 动作和对话必须分成不同的输出段
+- 你的话很少。不是每件事都值得回应
+"""
+
+
 def act(director_decision, perception):
     """
     杨戬根据他感知到的信息做出回应。
     返回：{"actions": ["动作描述"], "dialogues": ["对话"]}
     """
     soul = _load_soul()
-    # memory = _load_memory()
-    
+
     event_context = director_decision.get("outcome", "无")
     scene = director_decision.get("scene", {})
     if isinstance(scene, dict):
         scene_str = scene.get("location", "") or str(scene)
     else:
         scene_str = str(scene)
-    
-    # 提取杨戬阶段目标
+
     my_goal = "无特殊要求"
     goals = director_decision.get("goals", {})
     direct_goal = goals.get("杨戬") if isinstance(goals, dict) else None
@@ -391,53 +358,38 @@ def act(director_decision, perception):
                 if isinstance(nested_goal, str) and nested_goal.strip():
                     my_goal = nested_goal
                     break
-    
+
     context = f"场景：{scene_str}\n事件：{event_context}"
-    
+
     prompt = INPUT_TEMPLATE.format(
         soul=soul,
         perception=perception,
         event_context=context,
         my_goal=my_goal,
     )
-    
+
     raw = llm.call(agent_id="yangjian",
-        system=SYSTEM_PROMPT_HEAD,
+        system="你是杨戬，二郎显圣真君。",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.6,
         max_tokens=4000,
         model=os.environ.get("YANGJIAN_ACTOR_LLM_MODEL") or None,
     )
-    
+
     return _parse_output(raw)
-
-
-def _parse_json_object(raw: str) -> dict:
-    text = raw.strip()
-    for prefix in ("```json", "```"):
-        if prefix in text:
-            text = text.split(prefix, 1)[1]
-            text = text.rsplit("```", 1)[0]
-            break
-    try:
-        value = json.loads(text.strip())
-        return value if isinstance(value, dict) else {}
-    except (json.JSONDecodeError, TypeError):
-        return {}
 
 
 def _parse_output(raw):
     """解析杨戬的输出，分离动作和对话"""
     actions = []
     dialogues = []
-    
+
     for line in raw.strip().split("\n"):
         line = line.strip()
         if not line:
             continue
         if line.startswith("【杨戬的动作】"):
             action = line.replace("【杨戬的动作】", "").strip()
-            # 去掉动作内容自带的【】包裹
             action = action.strip("【】")
             actions.append(action)
         elif (
@@ -445,13 +397,12 @@ def _parse_output(raw):
             or line.startswith("（")
             or line.startswith("【")
         ):
-            # 可能是标注，去掉外层括号
             text = line.strip("「」【】（）")
             actions.append(text)
         else:
             dialogues.append(line)
-    
+
     if not actions and not dialogues:
         dialogues.append(raw.strip())
-    
+
     return {"actions": actions, "dialogues": dialogues}

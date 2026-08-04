@@ -396,7 +396,7 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
             return {
                 "story_id": plan.story_id,
                 "current_beat_id": beat.beat_id,
-                "beat_plot": beat.plot,
+                "beat_plot": beat.plot or getattr(beat, "purpose", "") or "",
                 "beat_goal": transitions[0].get("goal") if transitions else "",
                 "beat_tick_counter": state.get("beat_tick_counter", 0),
                 "participants": list(beat.participants),
@@ -441,7 +441,7 @@ def get_current_beat_info(state: dict[str, Any] | None = None) -> dict[str, Any]
         "story_id": plan.story_id,
         "current_beat_id": beat.beat_id,
         "active_side_arc": _find_arc(plan, beat.beat_id) if _find_arc(plan, beat.beat_id) != "main" else None,
-        "beat_plot": beat.plot,
+        "beat_plot": beat.plot or getattr(beat, "purpose", "") or "",
         "beat_goal": transitions[0].get("goal") if transitions else "",
         "beat_tick_counter": state.get("beat_tick_counter", 0),
         "participants": list(beat.participants),

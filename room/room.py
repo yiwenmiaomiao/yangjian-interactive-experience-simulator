@@ -1302,6 +1302,7 @@ def _tick_storyline(state, user_message=None, source="cron", lf_ctx=None):
                             "产生符合角色的行动或明确不行动原因",
                         )
                     ),
+                    beat_action_brief=str(raw_task.get("beat_action_brief", "")),
                 )
             except ValueError as exc:
                 log_event(
@@ -2082,12 +2083,14 @@ def _synthetic_confirmed_events_for_narration(
     # 兜底：无 brief/scene_facts 时用 beat 目的作为叙事锚点，
     # 保证 narrator 始终有素材可写（旁白是用户的眼睛，不能空转）
     if not events and bi:
+        beat_goal = str(bi.get("beat_goal", "")).strip()
         beat_plot = str(bi.get("beat_plot", "")).strip()
-        if beat_purpose:
+        anchor = beat_goal or beat_plot
+        if anchor:
             events.append({
-                "event_id": "confirmed_director_beat_plot",
+                "event_id": "confirmed_director_beat_anchor",
                 "event_type": "scene_anchor",
-                "summary": beat_purpose[:150],
+                "summary": anchor[:150],
                 "participants": [],
                 "fact_ids": [],
             })

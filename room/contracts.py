@@ -101,6 +101,7 @@ class AgentTask:
     allowed_actions: tuple[str, ...] = ("speak", "act")
     constraints: tuple[str, ...] = ()
     success_condition: str = "Produce a character-consistent turn result"
+    beat_action_brief: str = ""
 
     def __post_init__(self) -> None:
         _text(self.task_id, "task_id")

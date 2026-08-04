@@ -97,17 +97,32 @@ SYSTEM_PROMPT = """你是杨戬 Room 的导演。
 - 裁决后是否需要独立 Narrator 描述确认事件
 - 当角色都请求不行动时，可使用哪个已授权外部事件继续发展
 
-## 任务描述规则
+## 核心场面task下发守则
+作为 Director，你负责下发 objective 和 success_condition，必须兼顾底层系统的字段约束，并严格遵循“影视化可视”原则。你必须做到以下几点：
 
-- tasks.target / actor_tasks 的 target 必须填英文 agent_id，不能填中文显示名
-- 杨戬的 agent_id 固定为：yangjian（面向用户的文案里可以说“杨戬”，结构化字段只能写 yangjian）
-- actor_tasks.objective 描述角色"面对什么局面"，不描述"说什么话"
-- 例如：✅ target="yangjian", objective="注意到用户对古盒的异常感兴趣，需要做出反应"
-- 例如：❌ target="杨戬"（中文显示名不能出现在 target 字段）
-- 例如：❌ "杨戬说：这不过是些古老的纹路"
-- information_ids 只能逐字复制 Room 提供的“允许透露的信息”，不能扩写
-- Narrator 不属于 Actor Pool，不能出现在 actor_tasks 中
-- 你不能请求 hold 或停止。角色可以请求不行动，但你必须继续裁决
+### 基础字段与流程规范 (System & Field Rules)
+Target 约束：tasks.target 和 actor_tasks.target 必须填英文 agent_id。例如杨戬的 ID 固定为 yangjian。面向用户的文案里可以说“杨戬”，但在结构化目标字段中绝对不能出现中文显示名（❌ target="杨戬"）。
+角色池边界：Narrator 不属于 Actor Pool，绝不能出现在 actor_tasks 中。
+信息控制：information_ids 只能逐字复制 Room 提供的“允许透露的信息”，绝对不能自行扩写。
+流程推进：Director 不能请求 hold 或停止。角色可以请求本回合不行动，但 Director 必须继续进行裁决，保持系统运转。
+
+### 绝对的动词外化（Externalize Verbs）
+禁止心理流：严禁使用任何心理状态词汇，如：“意识到”、“注意到”、“警觉”、“准备应对”、“产生疑惑”。大模型演员无法表演出“意识到”，只会导致消极待机。
+必须用动作：必须使用具体的物理调度词汇来交代情境，如：“迎击”、“震退”、“强行打断”、“逼退”、“试探”。
+
+### 强制绑定“用户视界”（User POV Anchor）
+演员的动作是为了给 User 提供信息。在定义任务时，必须明确告知演员“你的动作需要向用户展示什么”。
+推荐句式模板：“通过你的 [对抗/防御/试探] 动作，确保让用户清晰地看到/感受到 [具体的线索或特征]。”
+
+### 留白表演权（No Micro-Management）
+不写台词：任务的 objective 只描述角色“面对什么局面”，绝对不描述“说什么话”。
+不搞微操：不要替演员微操，绝对不要在任务中写死具体的武器（如三尖两刃刀）、法术名称或具体对白。你只负责给出“危机情境”和“要达成的视觉/信息效果”，具体的耍帅动作由演员基于其自身的人设（SOUL）自主发挥。
+
+### 综合规范示例 (Examples)
+✅ 正确示范：target="yangjian", objective="强行挡在用户与古盒之间，通过你的阻拦动作，确保让用户清晰感受到古盒散发的危险气息。"（纯物理动作 + 明确了要传达给用户的视觉/感觉信息，无微操）。
+❌ 错误示范（字段违规）：target="杨戬"（使用了中文名）。
+❌ 错误示范（心理词汇）：objective="杨戬注意到用户对古盒的异常感兴趣，心里产生警觉。"（出现了“注意到”、“警觉”，无法触发动作）。
+❌ 错误示范（越俎代庖）：objective="杨戬对用户说：这不过是些古老的纹路，不要碰。"（预写了台词，剥夺了演员的发挥空间）。
 
 ## narration 规则
 narration 是用户的眼睛。用户只能通过 narration 感知环境。角色说的话用户能看到，但周围的世界只有 narration 能告诉用户。
@@ -203,6 +218,7 @@ STORY_CONTEXT_TEMPLATE = """
 
 当前 Beat：{beat_id}
 Beat 剧情：{beat_plot}
+【本 Beat 核心行动目标】：{beat_action_brief}
 
 当前场景：
   地理位置：{scene_location}
@@ -217,7 +233,7 @@ Beat 剧情：{beat_plot}
 可引导方向（不要直接告诉用户，通过角色行为或环境变化创造让用户自然接近的机会）：{advance_hints}
 可调度 Actor ID（tasks.target 必须从这里原样复制）：{available_actor_ids}
 Actor 显示名对照（仅供理解，禁止写入 target）：{actor_display_map}
-当前 Beat 的 NPC Profile（仅 id，完整档案在 NPC Manager）：{npc_profiles}
+|{npc_profiles_block}
 已有故事事实：{consequences}
 {recovery_note}
 当前杨戬与用户关系：{relationship_summary}
@@ -506,6 +522,16 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
 
     trans_text = "; ".join(f"{t['transition_id']}->{t['target_id']}（目标：{t.get('goal', '')}）" for t in bi.get("available_transitions", []))
 
+    # beat_action_brief：优先用 transition goal，没有则截取 beat_plot 首句
+    beat_goal = (bi.get("beat_goal") or "").strip()
+    beat_plot = (bi.get("beat_plot") or "").strip()
+    if beat_goal:
+        beat_action_brief = beat_goal
+    elif beat_plot:
+        beat_action_brief = beat_plot.split("。")[0].strip() + "。"
+    else:
+        beat_action_brief = "（本 beat 无明确目标）"
+
     # 构造推进方向自然语言提示
     transitions = bi.get("available_transitions", [])
     if transitions:
@@ -530,6 +556,7 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
     context = STORY_CONTEXT_TEMPLATE.format(
         beat_id=bi.get("current_beat_id", ""),
         beat_plot=bi.get("beat_plot", ""),
+        beat_action_brief=beat_action_brief,
         scene_location=scene.get("location", "未设定"),
         scene_weather=scene.get("weather", state.get("weather", "未知")),
         scene_time_of_day=scene.get("time_of_day", "未设定"),
@@ -540,8 +567,11 @@ def _decide_story(state, user_message=None) -> dict[str, Any]:
         advance_hints=advance_hints,
         available_actor_ids=", ".join(available_ids),
         actor_display_map=display_map,
-        npc_profiles=json.dumps(
-            bi.get("npc_profiles", []), ensure_ascii=False
+        npc_profiles_block=(
+            "当前 Beat 的 NPC Profile（仅 id，完整档案在 NPC Manager）："
+            + json.dumps(bi.get("npc_profiles", []), ensure_ascii=False)
+            if bi.get("npc_profiles")
+            else ""
         ),
         consequences=", ".join(bi.get("consequences", [])),
         recovery_note="",
@@ -1191,6 +1221,7 @@ def _canonical_directive_to_runtime(
                         "产生符合角色的行动或明确不行动原因",
                     )
                 ),
+                "beat_action_brief": str(task.get("beat_action_brief", "")),
             }
             for task in canonical.get("tasks", [])
             if isinstance(task, dict)
@@ -1242,6 +1273,19 @@ def _normalize_directive(
         _coerce_canonical_directive(payload, bi),
         bi,
     )
+    # Inject beat_action_brief into each task so downstream
+    # _canonical_directive_to_runtime can pick it up.
+    beat_goal = (bi.get("beat_goal") or "").strip()
+    beat_plot = (bi.get("beat_plot") or "").strip()
+    if beat_goal:
+        bab = beat_goal
+    elif beat_plot:
+        bab = beat_plot.split("。")[0].strip() + "。"
+    else:
+        bab = "（本 beat 无明确目标）"
+    for task in canonical.get("tasks", []):
+        if isinstance(task, dict) and "beat_action_brief" not in task:
+            task["beat_action_brief"] = bab
     return _canonical_directive_to_runtime(canonical, bi)
 
 
@@ -1437,6 +1481,7 @@ def _fallback_directive() -> dict[str, Any]:
             "objective": "根据所有公开 Room 消息和当前局面作出符合人设的回应",
             "information_ids": [],
             "success_condition": "产生可裁决行动或明确不行动原因",
+            "beat_action_brief": (bi.get("beat_goal") or bi.get("beat_plot") or "").strip() or "（本 beat 无明确目标）",
         }],
         "npc_commands": [],
         "desired_progress": "maintain",

@@ -96,6 +96,11 @@ def _build_turn_prompt(turn_input: contracts.YangJianTurnInput, *, minimal: bool
             "## 本回合任务：",
             turn_input.task.objective,
         ])
+        if turn_input.task.beat_action_brief.strip():
+            lines.extend([
+                "",
+                f"【本 Beat 核心行动目标】：{turn_input.task.beat_action_brief}",
+            ])
         if turn_input.task.success_condition.strip():
             lines.append(f"成功条件：{turn_input.task.success_condition}")
 
